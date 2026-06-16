@@ -1,0 +1,109 @@
+# ============================================================
+# Cấu hình Range Estimator — Ước lượng quãng đường còn lại
+# ============================================================
+# Dùng bởi: src/range_estimator/estimator.py
+# Tham khảo: Giáo trình Chương 1–4
+
+battery:
+  # Dung lượng pin tính theo năng lượng
+  # pack_capacity_wh = nominal_voltage × capacity_ah × soh_factor
+  # = 72V × 30.65Ah × 1.0 = 2206.8 Wh
+  pack_capacity_wh: 2206.8
+
+  # Điện áp pack trung bình (V) — dùng để tính Công suất = V × I
+  # Liion LFP: 3.2V/cell × 23 cell (series) ~ 72V ± 10V
+  nominal_pack_voltage: 72.0
+
+# ============================================================
+# Chương 1: EWMA Baseline (Tính tiêu thụ năng lượng trung bình)
+# ============================================================
+ewma:
+  # Tham số smoothing α (0.0–1.0)
+  # - α = 0.1: rất mịn, phản ứng chậm (phù hợp với lái bình thường)
+  # - α = 0.3: cân bằng (mặc định)
+  # - α = 0.5: phản ứng nhanh, nhạy cảm với thay đổi
+  alpha: 0.3
+
+  # Giá trị ban đầu Wh/km nếu chưa tính được
+  # (~50 Wh/km là mức tiêu thụ điển hình cho xe điện nhẹ)
+  initial_wh_per_km: 50.0
+
+# ============================================================
+# Chương 3: Behavior Features (Tính từ cửa sổ 60 sample)
+# ============================================================
+behavior:
+  # Cửa sổ dữ liệu để tính behavior (sample)
+  # 60 sample ≈ 60 giây ở 1Hz, ≈ 10 giây ở 6Hz
+  window_size: 60
+
+  # Ngưỡng tốc độ để coi xe đang "dừng"
+  stop_speed_kmh: 5.0
+
+# ============================================================
+# Chương 4: Behavior Factor (Kết hợp behavior features)
+# ============================================================
+behavior_factor:
+  # Công thức linear regression:
+  #   factor = offset + coeff_speed × avg_speed
+  #                   + coeff_accel × accel_std
+  #                   + coeff_stop × stop_ratio
+  #
+  # Giải thích:
+  # - Tốc độ cao → tiêu thụ năng lượng nhiều → factor lớn → range giảm
+  # - Gia tốc cao (lái bốc) → tiêu thụ nhiều → factor lớn → range giảm
+  # - Tỷ lệ dừng cao (lái trong thành phố) → tiêu thụ ít → factor nhỏ → range tăng
+
+  coefficients:
+    # Ảnh hưởng của tốc độ trung bình (% factor / km/h)
+    # 0.005 → mỗi km/h lái cao thêm → factor tăng 0.5%
+    speed: 0.005
+
+    # Ảnh hưởng của gia tốc (% factor / m/s²)
+    # 0.02 → mỗi m/s² gia tốc cao hơn → factor tăng 2%
+    accel: 0.02
+
+    # Ảnh hưởng của tỷ lệ dừng (% factor / phần)
+    # -0.3 → nếu toàn bộ thời gian dừng → factor giảm 30%
+    #      → nếu không dừng lần nào → factor không thay đổi (stop_ratio=0)
+    stop: -0.3
+
+    # Giá trị baseline (khi tất cả features = 0)
+    # offset = 1.0 nghĩa là factor bên tính toán = 1.0 (không điều chỉnh)
+    offset: 1.0
+
+  # Giới hạn giá trị factor để tránh outlier
+  # Nếu factor tính được < min hoặc > max, sẽ được clamp
+  min_factor: 0.3  # Tối thiểu 0.3x tốc độ tiêu thụ (lái rất êm)
+  max_factor: 2.0  # Tối đa 2.0x tốc độ tiêu thụ (lái rất bốc)
+
+# ============================================================
+# Làm mượt và giới hạn output (chặn ca nổ range)
+# ============================================================
+smoothing:
+  # Ngưỡng tốc độ tối thiểu để tính Wh/km — dưới ngưỡng giữ giá trị cũ
+  # 5 km/h khớp với stop_speed_kmh của behavior, tránh P/v_rất_nhỏ → Wh/km nổ
+  v_min_kmh: 5.0
+
+  # Giới hạn Wh/km input trước khi feed vào EWMA (chặn outlier phút đầu)
+  # min 18 Wh/km ≈ lăn xuống dốc; max 60 Wh/km ≈ phanh tái sinh hết cỡ
+  wh_per_km_min: 18.0
+  wh_per_km_max: 60.0
+
+  # EWMA cho output range_km: α = 0.05 → τ ≈ 20s ở 1Hz
+  # Smooth hơn EWMA input (α=0.3) vì behavior_factor còn gây jitter sau EWMA Wh/km
+  range_ewma_alpha: 0.05
+
+  # Giới hạn cứng range output — xe Evo 200 Lite tối đa ~120 km/lần sạc
+  range_km_max: 120.0
+
+# ============================================================
+# Runtime parameters
+# ============================================================
+runtime:
+  # Tần số cập nhật (Hz)
+  # Khuyến cáo: 10Hz (khớp với main loop)
+  # Range Estimator cập nhật mỗi khi có cửa sổ dữ liệu 60 sample mới
+  update_hz: 10
+
+  # Có log chi tiết không
+  debug: false

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from src.preprocessing.loader import load_evo200_csv, list_evo200_files; print\\('OK'\\)\")",
+      "Bash(python -c \"import ast, pathlib; ast.parse\\(pathlib.Path\\('src/preprocessing/loader.py'\\).read_text\\(encoding='utf-8'\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"import ast, pathlib; ast.parse\\(pathlib.Path\\('src/preprocessing/windowing.py'\\).read_text\\(encoding='utf-8'\\)\\); print\\('Syntax OK'\\)\")"
+    ]
+  }
+}

@@ -1,0 +1,198 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                 VinFast Evo 200 SoC PROJECT — QUICK RUN GUIDE                 ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+Choose Your Path:
+
+┌─ OPTION 1: TEST EVERYTHING (5 min) ⭐ START HERE
+│
+│  cd d:\DoAn\SourceCode
+│  python -m venv venv
+│  venv\Scripts\activate
+│  pip install numpy pandas pyyaml flask flask-socketio pyserial python-can
+│  pytest tests/ -v
+│
+│  ✓ Output: 46/46 tests PASSED
+│
+└────────────────────────────────────────────────────────────────────────────────
+
+
+┌─ OPTION 2: CHECK DATA QUALITY (2 min)
+│
+│  [After Option 1]
+│  python verify_coulomb_bias.py
+│
+│  ✓ Output: Coulomb bias report (target: < 1%)
+│
+└────────────────────────────────────────────────────────────────────────────────
+
+
+┌─ OPTION 3: RUN WEB DASHBOARD (Live)
+│
+│  [After Option 1]
+│  python -m flask --app src.display.web run --host 0.0.0.0 --port 8080
+│
+│  ✓ Open browser: http://localhost:8080/
+│  ✓ Shows: 3 battery icons, real-time stats
+│
+└────────────────────────────────────────────────────────────────────────────────
+
+
+┌─ OPTION 4: RUN MAIN SYSTEM (Real-time 10Hz Loop)
+│
+│  [After Option 1]
+│  [Requires: USB-CAN adapter connected]
+│  python -m src.main
+│
+│  ✓ Output: Live CAN data → SoC estimates → CSV logs
+│  ✓ CSV saved to: data/processed/runtime_YYYY-MM-DD_*.csv
+│
+└────────────────────────────────────────────────────────────────────────────────
+
+
+┌─ OPTION 5: TRAIN YOUR OWN MODEL (10 min)
+│
+│  [After Option 1]
+│  pip install torch matplotlib jupyter
+│  jupyter notebook
+│
+│  → Open: notebooks/02_train_cnn1d.ipynb
+│  → Click: Cell → Run All
+│
+│  ✓ Output: models/soc_cnn1d.pt (~20MB)
+│
+└────────────────────────────────────────────────────────────────────────────────
+
+
+┌─ OPTION 6: EXPORT TO TFLite (5 min)
+│
+│  [After Option 5]
+│  jupyter notebook
+│
+│  → Open: notebooks/03_export_tflite.ipynb
+│  → Click: Cell → Run All
+│
+│  ✓ Output: models/soc_cnn1d.tflite (~3.2MB, for Pi 4)
+│
+└────────────────────────────────────────────────────────────────────────────────
+
+
+┌─ OPTION 7: DEPLOY TO RASPBERRY Pi 4 (30 min)
+│
+│  [After Options 5-6]
+│  [On Pi:]
+│  ssh pi@<pi-ip>
+│  git clone <repo> ~/soc-monitor
+│  cd ~/soc-monitor
+│  chmod +x deployment/setup-pi.sh
+│  ./deployment/setup-pi.sh
+│
+│  [Then copy model:]
+│  scp models/soc_cnn1d.tflite pi@<pi-ip>:~/soc-monitor/models/
+│
+│  [Then start service:]
+│  sudo systemctl start soc-monitor
+│
+│  ✓ Access: http://<pi-ip>:8080/
+│
+└────────────────────────────────────────────────────────────────────────────────
+
+
+QUICK REFERENCE TABLE:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Option │ Purpose              │ Time │ Requirements        │ Output          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│   1    │ Test all modules     │ 5m   │ Python 3.9+        │ 46 tests ✓      │
+│   2    │ Check data quality   │ 2m   │ Option 1 + CSVs    │ Bias report     │
+│   3    │ Web dashboard        │ ∞    │ Option 1           │ :8080 UI        │
+│   4    │ Real-time system     │ ∞    │ Option 1 + CAN     │ CSV logs        │
+│   5    │ Train model          │ 10m  │ Option 1 + PyTorch │ .pt model       │
+│   6    │ Export TFLite        │ 5m   │ Option 5           │ .tflite model   │
+│   7    │ Deploy to Pi         │ 30m  │ Options 5-6        │ Pi service ✓    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+DEPENDENCIES TO INSTALL (Option 1):
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Core:                                                                         │
+│  - numpy          (numerical computing)                                      │
+│  - pandas         (data manipulation)                                        │
+│  - pyyaml         (config files)                                             │
+│  - flask          (web server)                                               │
+│  - flask-socketio (real-time updates)                                        │
+│  - pyserial       (serial communication)                                     │
+│  - python-can     (CAN bus interface)                                        │
+│                                                                              │
+│ Optional (for training):                                                     │
+│  - torch          (deep learning)                                            │
+│  - matplotlib     (plotting)                                                 │
+│  - jupyter        (notebooks)                                                │
+│                                                                              │
+│ Optional (for testing):                                                      │
+│  - pytest         (test runner)                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+
+INSTALLATION COMMAND (Copy & Paste):
+───────────────────────────────────────────────────────────────────────────────
+python -m venv venv
+venv\Scripts\activate
+pip install numpy pandas pyyaml flask flask-socketio pyserial python-can
+
+
+AFTER INSTALLATION, RUN TESTS:
+───────────────────────────────────────────────────────────────────────────────
+pytest tests/ -v
+
+
+PROJECT STRUCTURE:
+───────────────────────────────────────────────────────────────────────────────
+src/                    ← Runtime code (11 modules)
+├── preprocessing/      ← CSV loading, normalization, windowing
+├── can_reader/         ← USB-CAN communication
+├── coulomb_counter/    ← Coulomb counter SoC estimator
+├── soc_inference/      ← CNN1D model inference
+├── range_estimator/    ← Range prediction
+├── display/            ← Web dashboard
+├── logger/             ← CSV runtime logging
+└── main.py             ← 10Hz main loop entry point
+
+notebooks/              ← Training & analysis
+├── 01_eda.ipynb       ← Exploratory data analysis
+├── 02_train_cnn1d.ipynb        ← Model training
+└── 03_export_tflite.ipynb      ← TFLite conversion
+
+tests/                  ← Unit & integration tests (46 tests)
+configs/                ← YAML configuration files
+data/                   ← Datasets (15 CSV files)
+models/                 ← Trained models
+deployment/             ← Pi 4 setup scripts
+docs/                   ← Documentation
+
+
+KEY FEATURES:
+───────────────────────────────────────────────────────────────────────────────
+✓ 3 Parallel SoC Estimators (BMS, Coulomb Counter, CNN1D)
+✓ Real-time CAN Data Processing (10Hz)
+✓ Deep Learning Model (CNN1D)
+✓ Web Dashboard with Live Visualization
+✓ CSV Runtime Logging
+✓ Range Estimation with Behavior Features
+✓ 46 Automated Tests (all passing)
+✓ Raspberry Pi 4 Ready
+✓ Production-Ready Code
+
+
+DOCUMENTATION:
+───────────────────────────────────────────────────────────────────────────────
+START_HERE.md           ← Project overview & next steps
+SETUP_LOCAL.md          ← Detailed setup guide
+RUN_PROJECT.md          ← This guide (detailed version)
+docs/API.md             ← Module API reference
+docs/DEVELOPMENT.md     ← Developer guide
+docs/PERFORMANCE.md     ← Pi 4 benchmarks
+deployment/README.md    ← Pi deployment guide
+
+
+NEXT STEP: Choose an option above and follow the instructions! 🚀
+───────────────────────────────────────────────────────────────────────────────

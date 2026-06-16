@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evo 200 Lite — BMS Diagnostic</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        /* Dùng màu comfort cố định — trang diagnostic, không đổi theme */
+        :root { --acc: #4FA8FF; --bg1: #0a1622; }
+
+        html, body {
+            min-height: 100%;
+            background: radial-gradient(125% 135% at 50% 40%, var(--bg1), #000 68%);
+            color: #F3F6FA;
+            font-family: system-ui, -apple-system, 'Segoe UI', Arial, sans-serif;
+            font-variant-numeric: tabular-nums;
+            padding: 14px;
+        }
+
+        /* ── Header ── */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255,255,255,.07);
+            padding-bottom: 10px;
+            margin-bottom: 18px;
+        }
+        .header h2 {
+            font-size: 13px;
+            font-weight: 500;
+            letter-spacing: .1em;
+            color: rgba(255,255,255,.4);
+        }
+        .back-btn {
+            padding: 5px 14px;
+            font-size: 11px;
+            color: rgba(255,255,255,.4);
+            text-decoration: none;
+            border: 1px solid rgba(255,255,255,.1);
+            border-radius: 20px;
+            transition: color .15s, border-color .15s;
+        }
+        .back-btn:hover { color: rgba(255,255,255,.8); border-color: rgba(255,255,255,.3); }
+
+        /* ── 3 stat chính ── */
+        .main-stats {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 18px;
+        }
+        .stat-box {
+            flex: 1;
+            background: rgba(255,255,255,.04);
+            border: 1px solid rgba(255,255,255,.08);
+            border-radius: 8px;
+            padding: 12px 14px;
+            text-align: center;
+        }
+        .stat-label {
+            font-size: 10px;
+            color: rgba(255,255,255,.35);
+            letter-spacing: .08em;
+            margin-bottom: 6px;
+        }
+        .stat-val {
+            font-size: 32px;
+            font-weight: 500;
+            line-height: 1;
+        }
+        .stat-val .unit {
+            font-size: 14px;
+            font-weight: 400;
+            color: rgba(255,255,255,.35);
+            margin-left: 3px;
+        }
+        /* Convention: I > 0 khi xả (discharge=đỏ), I < 0 khi sạc (xanh) */
+        .text-discharge { color: #FB7185; }
+        .text-charge    { color: #4ade80; }
+        .text-normal    { color: #F3F6FA; }
+
+        /* ── MAE chart section ── */
+        .mae-section {
+            background: rgba(255,255,255,.03);
+            border: 1px solid rgba(255,255,255,.07);
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin-bottom: 18px;
+        }
+        .mae-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 8px;
+        }
+        .mae-title {
+            font-size: 10px;
+            color: rgba(255,255,255,.3);
+            letter-spacing: .08em;
+        }
+        /* Readout box: mỗi nguồn 1 dòng */
+        .mae-readout { display: flex; gap: 16px; }
+        .mae-item { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+        .mae-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+        .mae-lbl  { color: rgba(255,255,255,.3); }
+        .mae-val  { font-weight: 700; }
+        /* canvas chiếm hết chiều rộng section */
+        #maeCanvas { display: block; width: 100%; height: 120px; }
+
+        /* ── Section title ── */
+        .section-title {
+            font-size: 10px;
+            color: rgba(255,255,255,.3);
+            letter-spacing: .09em;
+            margin-bottom: 10px;
+        }
+
+        /* ── Lưới 22 cell ── */
+        .cell-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+        }
+        @media (max-width: 480px) {
+            .cell-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+        .cell-box {
+            background: rgba(255,255,255,.04);
+            border: 1px solid rgba(255,255,255,.08);
+            border-left: 2px solid var(--acc);
+            border-radius: 6px;
+            padding: 8px 10px;
+            text-align: center;
+        }
+        .cell-id  {
+            font-size: 9px;
+            color: rgba(255,255,255,.3);
+            letter-spacing: .05em;
+            margin-bottom: 3px;
+        }
+        .cell-vol {
+            font-size: 18px;
+            font-weight: 500;
+            color: #F3F6FA;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h2>BMS Diagnostic — Evo 200 Lite</h2>
+        <a href="/" class="back-btn">← Táp lô</a>
+    </div>
+
+    <!-- 3 stat chính: điện áp, dòng, công suất -->
+    <div class="main-stats">
+        <div class="stat-box">
+            <div class="stat-label">Tổng điện áp</div>
+            <div class="stat-val" style="color:var(--acc)">
+                <span id="vol_total">0.0</span><span class="unit">V</span>
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Dòng điện</div>
+            <div class="stat-val text-normal" id="current_val">
+                0.0<span class="unit">A</span>
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Công suất tổng</div>
+            <div class="stat-val" id="power_val" style="color:#FBBF24">
+                0.0<span class="unit">W</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- MAE chart: sai số tức thời + MAE trượt 60s, vẽ lại mỗi 1Hz -->
+    <div class="mae-section">
+        <div class="mae-header">
+            <div class="mae-title">SAI SỐ SoC — so với BMS (60 giây gần nhất)</div>
+            <div class="mae-readout">
+                <div class="mae-item">
+                    <div class="mae-dot" style="background:#FB7185"></div>
+                    <span class="mae-lbl">CNN1D MAE</span>
+                    <span class="mae-val" id="mae-model-val" style="color:#FB7185">—</span>
+                </div>
+                <div class="mae-item">
+                    <div class="mae-dot" style="background:#FBBF24"></div>
+                    <span class="mae-lbl">Coulomb MAE</span>
+                    <span class="mae-val" id="mae-cc-val" style="color:#FBBF24">—</span>
+                </div>
+            </div>
+        </div>
+        <canvas id="maeCanvas"></canvas>
+    </div>
+
+    <div class="section-title">Trạng thái 22 cell pin</div>
+    <div class="cell-grid" id="cell_container"></div>
+
+    <script>
+        var socket = io();
+
+        // ── Tạo động 22 hộp cell ──
+        var container = document.getElementById('cell_container');
+        for (var i = 1; i <= 22; i++) {
+            container.innerHTML +=
+                '<div class="cell-box">' +
+                '<div class="cell-id">Cell ' + i + '</div>' +
+                '<div class="cell-vol" id="c' + i + '">0.00</div>' +
+                '</div>';
+        }
+
+        // ── BMS cells handler ──
+        socket.on('update_bms', function(data) {
+            document.getElementById('vol_total').innerText = data.voltage;
+            document.getElementById('power_val').innerHTML = data.power + '<span class="unit">W</span>';
+
+            var cEl = document.getElementById('current_val');
+            cEl.innerHTML = data.current + '<span class="unit">A</span>';
+            if (data.current > 0)      cEl.className = 'stat-val text-discharge';
+            else if (data.current < 0) cEl.className = 'stat-val text-charge';
+            else                       cEl.className = 'stat-val text-normal';
+
+            if (data.cells && data.cells.length >= 22) {
+                for (var i = 1; i <= 22; i++) {
+                    document.getElementById('c' + i).innerText = data.cells[i-1].toFixed(2);
+                }
+            }
+        });
+
+        // ── MAE chart ──
+        var canvas = document.getElementById('maeCanvas');
+        var ctx    = canvas.getContext('2d');
+
+        var MAX_PTS  = 120;  // 120 giây dữ liệu (1Hz)
+        var BUF_MODEL = [];  // err_model theo thời gian
+        var BUF_CC    = [];  // err_cc theo thời gian
+
+        // Resize canvas theo DPR để nét trên màn hình HiDPI
+        function resizeCanvas() {
+            var dpr = window.devicePixelRatio || 1;
+            var w   = canvas.offsetWidth;
+            var h   = canvas.offsetHeight;
+            if (!w || !h) return;
+            canvas.width  = w * dpr;
+            canvas.height = h * dpr;
+            ctx.scale(dpr, dpr);
+        }
+        resizeCanvas();
+        window.addEventListener('resize', function(){ resizeCanvas(); drawChart(); });
+
+        function drawChart() {
+            var dpr = window.devicePixelRatio || 1;
+            var W = canvas.width  / dpr;
+            var H = canvas.height / dpr;
+            if (!W || !H) return;
+
+            ctx.clearRect(0, 0, W, H);
+
+            var PX = 32;  // padding trái (trục Y)
+            var PY = 8;   // padding trên/dưới
+            var CW = W - PX - 4;
+            var CH = H - PY * 2;
+
+            // Tính range Y: ít nhất ±2 (pp), tự co theo dữ liệu
+            var all = BUF_MODEL.concat(BUF_CC);
+            var yMax = 2, yMin = -2;
+            for (var i = 0; i < all.length; i++) {
+                if (all[i] > yMax) yMax = all[i];
+                if (all[i] < yMin) yMin = all[i];
+            }
+            // Thêm 20% padding Y
+            var yPad = (yMax - yMin) * 0.20 || 0.5;
+            yMax += yPad; yMin -= yPad;
+            var yRange = yMax - yMin || 1;
+
+            // Hàm chuyển (index, value) → (px_x, px_y)
+            var total = MAX_PTS;  // trục X cố định chiều dài MAX_PTS
+            function toX(i) { return PX + (i / (total - 1)) * CW; }
+            function toY(v) { return PY + CH - (v - yMin) / yRange * CH; }
+
+            // Nền lưới mờ
+            ctx.strokeStyle = 'rgba(255,255,255,.06)';
+            ctx.lineWidth   = 1;
+            var gridLevels = [yMin + yRange*0.25, yMin + yRange*0.5, yMin + yRange*0.75, yMax];
+            for (var g = 0; g < gridLevels.length; g++) {
+                ctx.beginPath();
+                ctx.moveTo(PX, toY(gridLevels[g]));
+                ctx.lineTo(PX + CW, toY(gridLevels[g]));
+                ctx.stroke();
+            }
+
+            // Đường zero (0%) — nét đứt mờ
+            ctx.save();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(255,255,255,.25)';
+            ctx.lineWidth   = 1;
+            ctx.beginPath();
+            ctx.moveTo(PX,       toY(0));
+            ctx.lineTo(PX + CW,  toY(0));
+            ctx.stroke();
+            ctx.restore();
+
+            // Nhãn Y (±2%) ở cạnh trái
+            ctx.fillStyle  = 'rgba(255,255,255,.3)';
+            ctx.font       = '9px system-ui, Arial';
+            ctx.textAlign  = 'right';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(yMax.toFixed(1) + '%', PX - 3, PY);
+            ctx.fillText('0%', PX - 3, toY(0));
+            ctx.fillText(yMin.toFixed(1) + '%', PX - 3, PY + CH);
+
+            // Hàm vẽ đường polyline từ buffer
+            function drawLine(buf, color) {
+                if (buf.length < 2) return;
+                ctx.strokeStyle = color;
+                ctx.lineWidth   = 1.5;
+                ctx.lineJoin    = 'round';
+                ctx.beginPath();
+                // Offset thời gian: dữ liệu mới ở cuối buffer, căn phải trục X
+                var offset = total - buf.length;
+                for (var i = 0; i < buf.length; i++) {
+                    var px = toX(offset + i);
+                    var py = toY(buf[i]);
+                    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+            }
+
+            // Vẽ err_cc (amber) trước, err_model (coral) sau (ở trên)
+            drawLine(BUF_CC,    '#FBBF24');
+            drawLine(BUF_MODEL, '#FB7185');
+        }
+
+        // ── Nhận event MAE từ backend (1Hz) ──
+        socket.on('update_mae', function(d) {
+            // Đẩy error tức thời vào buffer
+            BUF_MODEL.push(d.err_model);
+            BUF_CC.push(d.err_cc);
+            if (BUF_MODEL.length > MAX_PTS) BUF_MODEL.shift();
+            if (BUF_CC.length    > MAX_PTS) BUF_CC.shift();
+
+            // Cập nhật readout MAE trượt (hiện "—" khi chưa đủ warm-up)
+            var mEl = document.getElementById('mae-model-val');
+            var cEl = document.getElementById('mae-cc-val');
+            if (d.warm) {
+                mEl.textContent = d.mae_model.toFixed(1) + '%';
+                cEl.textContent = d.mae_cc.toFixed(1)    + '%';
+            } else {
+                mEl.textContent = '—';
+                cEl.textContent = '—';
+            }
+
+            // Vẽ lại chart (1Hz, không cần rAF loop)
+            drawChart();
+        });
+    </script>
+</body>
+</html>

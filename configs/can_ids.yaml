@@ -1,0 +1,176 @@
+# ============================================================
+# Bản đồ CAN ID — VinFast Evo 200 Lite
+# (CAN Signal Map)
+# ============================================================
+# Dùng bởi: src/can_reader/decoder.py
+# Nguồn: reverse-engineer từ USB-CAN Waveshare, xác nhận qua app.py của đồng nghiệp.
+#
+# Quy ước đọc byte:
+#   - Frame Waveshare: 20 byte tổng, byte 5-8 là CAN ID (Little-Endian),
+#     byte 10-17 là DATA (8 byte payload).
+#   - Trong phần "signals" dưới đây, byte_offset tính từ đầu DATA (0-indexed).
+#   - uint16: (data[offset] << 8) | data[offset+1]
+#   - int16 có dấu: uint16 rồi nếu > 32767 thì trừ 65536
+#
+# Quy ước dấu dòng điện SAU KHI decode:
+#   CAN raw: I < 0 khi xả, I > 0 khi sạc (giống file CSV training).
+#   → Đảo dấu trong decoder.py, KHÔNG đảo ở chỗ khác.
+
+# ------------------------------------------------------------
+# NHÓM 1: Trạng thái vận hành xe (Dashboard signals)
+# ------------------------------------------------------------
+
+frames:
+
+  # CAN ID 0x102 — Trạng thái đèn / chế độ xe
+  - id: 0x102
+    name: vehicle_status
+    description: "Trạng thái sẵn sàng (READY), chân chống, chế độ đỗ xe"
+    signals:
+      - name: is_ready
+        description: "Xe đang ở chế độ READY (máy bật, sẵn sàng di chuyển)"
+        byte_offset: 0
+        byte_length: 1
+        decode: "data[0] == 0x31"   # 0x31 = READY, các giá trị khác = không sẵn sàng
+        unit: "boolean"
+
+      - name: is_kickstand
+        description: "Chân chống đang hạ xuống"
+        byte_offset: 1
+        byte_length: 1
+        decode: "data[1] != 0x00"
+        unit: "boolean"
+
+  # CAN ID 0x201 — Tốc độ, đồng hồ km, phanh
+  - id: 0x201
+    name: vehicle_motion
+    description: "Tốc độ xe, odometer tích lũy, trạng thái phanh"
+    signals:
+      - name: speed_kmh
+        description: "Tốc độ xe (km/h)"
+        byte_offset: 0
+        byte_length: 2
+        decode: "uint16"            # (data[0] << 8) | data[1]
+        scale: 0.1                  # raw / 10 → km/h
+        unit: "km/h"
+
+      - name: odo_km
+        description: "Đồng hồ km tích lũy từ khi xuất xưởng"
+        byte_offset: 3
+        byte_length: 3
+        decode: "uint24"            # (data[3] << 16) | (data[4] << 8) | data[5]
+        scale: 0.1                  # raw / 10 → km
+        unit: "km"
+
+      - name: is_brake
+        description: "Đang đạp phanh"
+        byte_offset: 7
+        byte_length: 1
+        decode: "data[7] != 0x00"
+        unit: "boolean"
+
+  # CAN ID 0x30A — SoC từ BMS
+  - id: 0x30A
+    name: bms_soc
+    description: "State of Charge (SoC) do BMS xe tính toán"
+    signals:
+      - name: soc_bms
+        description: "SoC từ BMS (%), 0–100"
+        byte_offset: 2
+        byte_length: 1
+        decode: "uint8"             # data[2], đơn vị % trực tiếp
+        scale: 1.0
+        unit: "%"
+
+  # CAN ID 0x320 — Nhiệt độ pin
+  - id: 0x320
+    name: bms_temperature
+    description: "Nhiệt độ module pin"
+    signals:
+      - name: temp_c
+        description: "Nhiệt độ pin (°C)"
+        byte_offset: 3
+        byte_length: 1
+        decode: "uint8"             # data[3], đơn vị °C trực tiếp
+        scale: 1.0
+        unit: "°C"
+
+  # CAN ID 0x309 — Dòng điện pack
+  - id: 0x309
+    name: bms_current
+    description: "Dòng điện toàn pack (có dấu)"
+    signals:
+      - name: pack_current_a
+        description: >
+          Dòng điện pack (A). CAN raw: âm khi xả, dương khi sạc.
+          Decoder đảo dấu → project convention: dương khi xả.
+        byte_offset: 4
+        byte_length: 2
+        decode: "int16"             # signed: nếu uint16 > 32767 thì trừ 65536
+        scale: 0.01                 # raw / 100 → A
+        unit: "A"
+        sign_flip: true             # ĐẢO DẤU trong decoder để I > 0 khi xả
+
+# ------------------------------------------------------------
+# NHÓM 2: Điện áp từng cell pin (BMS network)
+# Xe có 22 cell, chia thành 6 frame (4 cell/frame trừ frame cuối)
+# Mỗi cell: uint16 × 0.0001 → V (dải thực tế ~3.0–3.65V/cell LFP)
+# ------------------------------------------------------------
+
+  # CAN ID 0x311 — Cell 1–4
+  - id: 0x311
+    name: cell_voltage_1_4
+    description: "Điện áp cell 1 đến 4"
+    signals:
+      - { name: cell_01_v, byte_offset: 0, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_02_v, byte_offset: 2, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_03_v, byte_offset: 4, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_04_v, byte_offset: 6, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+
+  # CAN ID 0x312 — Cell 5–8
+  - id: 0x312
+    name: cell_voltage_5_8
+    description: "Điện áp cell 5 đến 8"
+    signals:
+      - { name: cell_05_v, byte_offset: 0, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_06_v, byte_offset: 2, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_07_v, byte_offset: 4, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_08_v, byte_offset: 6, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+
+  # CAN ID 0x313 — Cell 9–12
+  - id: 0x313
+    name: cell_voltage_9_12
+    description: "Điện áp cell 9 đến 12"
+    signals:
+      - { name: cell_09_v, byte_offset: 0, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_10_v, byte_offset: 2, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_11_v, byte_offset: 4, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_12_v, byte_offset: 6, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+
+  # CAN ID 0x314 — Cell 13–16
+  - id: 0x314
+    name: cell_voltage_13_16
+    description: "Điện áp cell 13 đến 16"
+    signals:
+      - { name: cell_13_v, byte_offset: 0, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_14_v, byte_offset: 2, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_15_v, byte_offset: 4, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_16_v, byte_offset: 6, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+
+  # CAN ID 0x31A — Cell 17–20
+  - id: 0x31A
+    name: cell_voltage_17_20
+    description: "Điện áp cell 17 đến 20"
+    signals:
+      - { name: cell_17_v, byte_offset: 0, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_18_v, byte_offset: 2, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_19_v, byte_offset: 4, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_20_v, byte_offset: 6, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+
+  # CAN ID 0x31B — Cell 21–22
+  - id: 0x31B
+    name: cell_voltage_21_22
+    description: "Điện áp cell 21 và 22 (2 cell cuối)"
+    signals:
+      - { name: cell_21_v, byte_offset: 0, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }
+      - { name: cell_22_v, byte_offset: 2, byte_length: 2, decode: "uint16", scale: 0.0001, unit: "V" }

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>VinFast Evo 200 — Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+<style>
+/* ── @property: transition màu accent + nền ── */
+@property --acc{syntax:'<color>';inherits:true;initial-value:#4FA8FF;}
+@property --bg1{syntax:'<color>';inherits:true;initial-value:#0a1622;}
+
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+html,body{height:100%;background:#000;overflow-x:hidden;}
+
+/* ── Offline banner (sticky top) ── */
+#offline-banner{
+    display:none;position:sticky;top:0;z-index:10;
+    text-align:center;background:#7f1d1d;color:#fca5a5;
+    padding:5px 12px;font-size:12px;letter-spacing:.04em;
+}
+
+/* ── Cluster: nền radial gradient, đổi màu khi đổi mode ── */
+.cluster{
+    width:100%;min-height:100vh;
+    padding:14px 22px 22px;
+    color:#e9eff3;
+    font-family:system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+    background:radial-gradient(125% 135% at 50% 40%,var(--bg1) 0%,#000 68%);
+    transition:--acc .6s ease,--bg1 .6s ease;
+    overflow:hidden;
+}
+.cluster.comfort{--acc:#4FA8FF;--bg1:#0a1622;}
+.cluster.eco    {--acc:#2DD4BF;--bg1:#07211c;}
+.cluster.sport  {--acc:#FF5A3C;--bg1:#260a06;}
+
+/* ── Top bar: 6 chip + mode name + link BMS ── */
+.top{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:12px;}
+.modeName{color:#cdd5db;letter-spacing:.06em;font-size:12px;margin-left:auto;}
+.bms-link{
+    font-size:11px;padding:4px 12px;color:rgba(255,255,255,.4);
+    text-decoration:none;border:1px solid rgba(255,255,255,.12);
+    border-radius:20px;transition:.3s;
+}
+.bms-link:hover{color:#fff;border-color:var(--acc);}
+
+/* Chip cờ trạng thái xe */
+.chip{
+    display:inline-flex;align-items:center;padding:3px 9px;border-radius:3px;
+    font-size:10px;font-weight:700;letter-spacing:.07em;
+    border:1px solid rgba(255,255,255,.1);
+    color:rgba(255,255,255,.2);background:rgba(255,255,255,.03);
+    transition:.3s;
+}
+.chip.on-kick {border-color:#b91c1c;background:#450a0a;color:#fca5a5;}
+.chip.on-park {border-color:#c2410c;background:#431407;color:#fdba74;}
+.chip.on-ready{border-color:#15803d;background:#052e16;color:#86efac;}
+.chip.on-brake{border-color:#b91c1c;background:#450a0a;color:#fca5a5;}
+.chip.on-eco  {border-color:var(--acc);background:rgba(45,212,191,.12);color:var(--acc);}
+.chip.on-sport{border-color:var(--acc);background:rgba(255,90,60,.12); color:var(--acc);}
+
+/* ── Main row ── */
+.row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:2px;}
+
+/* Cột bên: SoC (trái) và range/metrics (phải) */
+.side{flex:1;min-width:130px;max-width:195px;}
+.side.r{text-align:right;}
+
+/* Nhãn + số lớn accent (dùng cho SoC#1 và range) */
+.lbl{font-size:11px;letter-spacing:.09em;color:#6f7a82;}
+.v1{
+    font-size:30px;font-weight:500;color:var(--acc);
+    transition:color .6s ease;font-variant-numeric:tabular-nums;
+    line-height:1.1;margin-top:2px;
+}
+/* Dòng nhỏ phụ (#2 CC, #3 model, SoH, Odo) */
+.v2{font-size:13px;font-variant-numeric:tabular-nums;}
+
+/* ── Ring wrap: container tương đối chứa SVG + overlay số ── */
+.ringwrap{position:relative;flex-shrink:0;}
+.ringwrap.big{width:clamp(230px,34vw,440px);height:clamp(230px,34vw,440px);}
+.ringwrap.sm {width:clamp(130px,18vw,200px);height:clamp(130px,18vw,200px);}
+.ringwrap svg{display:block;width:100%;height:100%;}
+
+/* Vòng progress phát sáng (glowing ring) — sao từ demo */
+.prog{
+    fill:none;stroke:var(--acc);stroke-width:4;stroke-linecap:round;
+    filter:drop-shadow(0 0 5px var(--acc)) drop-shadow(0 0 11px var(--acc));
+    transform-box:fill-box;transform-origin:center;transform:rotate(-90deg);
+    transition:stroke .6s ease;
+    /* stroke-dashoffset transition thêm qua JS sau sweep khởi động */
+}
+/* Vòng nền mờ trang trí (fc = faint circle) — sao từ demo */
+.fc{fill:none;stroke:var(--acc);opacity:.13;stroke-width:1;transition:stroke .6s ease;}
+
+/* Số + đơn vị overlay ở giữa ring */
+.num{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+.num b{font-weight:500;line-height:1;color:#f3f7fa;font-variant-numeric:tabular-nums;}
+.num span{letter-spacing:.2em;color:var(--acc);margin-top:6px;font-size:11px;transition:color .6s ease;}
+
+/* ── Hàng 3 metric: Nhiệt độ | SoH | Odo ── */
+.metrics-row{display:flex;gap:6px;margin-top:12px;}
+.metric-card{
+    flex:1;text-align:left;
+    background:rgba(255,255,255,.05);
+    border:1px solid rgba(255,255,255,.09);
+    border-radius:7px;padding:6px 8px;
+}
+.metric-val{font-size:16px;font-weight:500;color:#e9eff3;margin-top:2px;font-variant-numeric:tabular-nums;}
+.metric-unit{font-size:10px;color:rgba(255,255,255,.35);margin-left:1px;}
+
+/* ── Power row + mode chip ── */
+.powerrow{display:flex;align-items:center;justify-content:center;gap:22px;margin-top:12px;}
+.feat{
+    font-size:12px;padding:7px 16px;
+    border:1px solid var(--acc);color:var(--acc);
+    border-radius:20px;letter-spacing:.06em;transition:.6s ease;
+}
+
+/* ════════════════════════
+   PORTRAIT (mobile / narrow)
+════════════════════════ */
+@media (max-width:699px),(orientation:portrait){
+    .cluster{padding:10px 12px 16px;min-height:100svh;}
+    .row{flex-direction:column;align-items:stretch;gap:10px;}
+
+    /* Thứ tự trong portrait: ring trước, cột SoC sau, cột range/metrics cuối */
+    .side:not(.r){order:2;}
+    .ringwrap.big{order:1;align-self:center;
+        width:clamp(200px,72vw,300px);height:clamp(200px,72vw,300px);}
+    .side.r{order:3;text-align:left;max-width:none;}
+    .side{max-width:none;}
+
+    .powerrow{flex-wrap:wrap;gap:12px;}
+    .ringwrap.sm{width:clamp(110px,44vw,155px);height:clamp(110px,44vw,155px);}
+}
+</style>
+</head>
+<body>
+
+<div id="offline-banner">⚠ Mất kết nối — đang chờ dữ liệu CAN...</div>
+
+<div class="cluster comfort" id="cluster">
+
+  <!-- ── Top bar ── -->
+  <div class="top">
+    <span class="chip" id="c-kick">KICK</span>
+    <span class="chip" id="c-park">PARK</span>
+    <span class="chip" id="c-ready">READY</span>
+    <span class="chip" id="c-brake">BRAKE</span>
+    <span class="chip" id="c-eco">ECO</span>
+    <span class="chip" id="c-sport">SPORT</span>
+    <span class="modeName" id="modeName">chế độ comfort</span>
+    <a href="/bms" class="bms-link">BMS →</a>
+  </div>
+
+  <!-- ── Main row ── -->
+  <div class="row">
+
+    <!-- Cột trái: 3 nguồn SoC canh trái, cùng mép -->
+    <div class="side">
+      <div class="lbl">#1 BMS SoC</div>
+      <div class="v1"><span id="pp-bms">--</span><span style="font-size:17px">%</span></div>
+      <div class="v2" style="color:#FBBF24;margin-top:12px">
+        #2 Coulomb &nbsp;<span id="pp-cc">--%</span>
+      </div>
+      <div class="v2" style="color:#FB7185;margin-top:5px">
+        #3 CNN1D &nbsp;<span id="pp-model">--%</span>
+      </div>
+    </div>
+
+    <!-- Cột giữa: speed ring (SVG + overlay số) -->
+    <div class="ringwrap big">
+      <!-- viewBox 230×230, r=105, C=2π×105≈659.73 -->
+      <svg viewBox="0 0 230 230" aria-hidden="true">
+        <circle class="fc" cx="115" cy="115" r="105"/>
+        <circle class="fc" cx="115" cy="115" r="91"/>
+        <circle class="fc" cx="115" cy="115" r="77"/>
+        <circle class="prog" id="spProg" cx="115" cy="115" r="105"/>
+      </svg>
+      <div class="num">
+        <b id="spVal" style="font-size:clamp(52px,6.5vw,96px)">0</b>
+        <span>km/h</span>
+      </div>
+    </div>
+
+    <!-- Cột phải: range lớn + hàng 3 metric (nhiệt độ / SoH / odo) -->
+    <div class="side r">
+      <div class="lbl">range còn lại</div>
+      <div class="v1"><span id="p-range">--</span><span style="font-size:15px"> km</span></div>
+      <div class="metrics-row">
+        <div class="metric-card">
+          <div class="lbl">nhiệt độ</div>
+          <div class="metric-val"><span id="p-temp">--</span><span class="metric-unit">°C</span></div>
+        </div>
+        <div class="metric-card">
+          <div class="lbl">SoH</div>
+          <div class="metric-val"><span id="p-soh">--</span><span class="metric-unit">%</span></div>
+        </div>
+        <div class="metric-card">
+          <div class="lbl">odo</div>
+          <div class="metric-val"><span id="p-odo">--</span><span class="metric-unit">km</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /row -->
+
+  <!-- ── Power row: ring nhỏ + mode chip ── -->
+  <div class="powerrow">
+    <div class="ringwrap sm">
+      <!-- viewBox 150×150, r=66, C=2π×66≈414.69 -->
+      <svg viewBox="0 0 150 150" aria-hidden="true">
+        <circle class="fc" cx="75" cy="75" r="66"/>
+        <circle class="fc" cx="75" cy="75" r="55"/>
+        <circle class="prog" id="pwProg" cx="75" cy="75" r="66"/>
+      </svg>
+      <div class="num">
+        <b id="pwVal" style="font-size:clamp(24px,3.8vw,44px)">0</b>
+        <span>W · power</span>
+      </div>
+    </div>
+    <div class="feat" id="featChip">standard mode</div>
+  </div>
+
+</div><!-- /cluster -->
+
+<script>
+// ── Constants (1 chỗ — chỉnh khi biết đúng thông số Evo 200 Lite) ──
+var MAX_SPEED = 60;    // TODO: tốc độ tối đa (km/h)
+var MAX_POWER = 2000;  // TODO: công suất tối đa (W)
+
+// Chu vi vòng: C = 2π × r
+var Cs = 2 * Math.PI * 105;  // speed ring r=105
+var Cp = 2 * Math.PI * 66;   // power ring r=66
+
+// ── DOM refs ──
+var cluster = document.getElementById('cluster');
+var sp = document.getElementById('spProg');
+var pw = document.getElementById('pwProg');
+var spV = document.getElementById('spVal');
+var pwV = document.getElementById('pwVal');
+
+// ── Socket ──
+var socket = io();
+socket.on('connect',    function(){ document.getElementById('offline-banner').style.display='none'; });
+socket.on('disconnect', function(){ document.getElementById('offline-banner').style.display='block'; });
+
+// ── Khởi tạo dasharray + sweep on load ──
+// Bước 1: đặt dasharray + dashoffset=0 (arc đầy, chưa có transition)
+sp.style.strokeDasharray = Cs; sp.style.strokeDashoffset = 0;
+pw.style.strokeDasharray = Cp; pw.style.strokeDashoffset = 0;
+// Bước 2: sau 80ms bật transition + quét về trống → hiệu ứng sweep full→empty
+setTimeout(function(){
+    var tr = 'stroke .6s ease, stroke-dashoffset .28s cubic-bezier(.4,0,.2,1)';
+    sp.style.transition = tr;
+    pw.style.transition = tr;
+    sp.style.strokeDashoffset = Cs;
+    pw.style.strokeDashoffset = Cp;
+}, 80);
+
+// ── Tween số (~350ms, exponential lerp) — chỉ text; arc dùng CSS transition ──
+function makeTween(el){
+    var cur=0, tgt=0, raf=null;
+    function step(){
+        cur += (tgt - cur) * 0.18;
+        el.textContent = Math.round(cur);
+        if(Math.abs(tgt - cur) > 0.4){ raf = requestAnimationFrame(step); }
+        else{ cur = tgt; el.textContent = Math.round(cur); raf = null; }
+    }
+    return function(v){ tgt = v; if(!raf) raf = requestAnimationFrame(step); };
+}
+var tweenSpd = makeTween(spV);
+var tweenPwr = makeTween(pwV);
+
+// ── Helpers ──
+function setText(id, v){ var e=document.getElementById(id); if(e) e.textContent=v; }
+function setChip(id, active, cls){
+    var el = document.getElementById(id);
+    if(!el) return;
+    if(active) el.classList.add(cls); else el.classList.remove(cls);
+}
+
+// ── Theme theo chế độ lái ──
+var MODE = {
+    comfort: { name:'chế độ comfort', feat:'standard mode' },
+    eco:     { name:'chế độ eco',     feat:'efficiency · range mode' },
+    sport:   { name:'chế độ sport',   feat:'boost · power mode' },
+};
+var lastMode = '';
+function applyMode(m){
+    if(m === lastMode) return;
+    lastMode = m;
+    cluster.classList.remove('comfort','eco','sport');
+    cluster.classList.add(m);
+    setText('modeName', MODE[m].name);
+    setText('featChip', MODE[m].feat);
+}
+
+// ── update_dash handler ──
+socket.on('update_dash', function(d){
+    // Arc: cập nhật dashoffset ngay (CSS transition .28s)
+    var spd = d.speed || 0, pwr = d.power || 0;
+    sp.style.strokeDashoffset = Cs * (1 - Math.min(spd / MAX_SPEED, 1));
+    pw.style.strokeDashoffset = Cp * (1 - Math.min(pwr / MAX_POWER, 1));
+
+    // Số: tween mượt
+    tweenSpd(spd);
+    tweenPwr(pwr);
+
+    // 3 nguồn SoC
+    setText('pp-bms',   d.soc       !== undefined ? Math.round(d.soc)           : '--');
+    setText('pp-cc',    d.soc_cc    !== undefined ? d.soc_cc.toFixed(1)   + '%' : '--%');
+    setText('pp-model', d.soc_model !== undefined ? d.soc_model.toFixed(1)+ '%' : '--%');
+
+    // Stats
+    setText('p-range', d.range_km !== undefined ? d.range_km.toFixed(1) : '--');
+    setText('p-temp',  d.temp     !== undefined ? d.temp                : '--');
+    setText('p-soh',   d.soh      !== undefined ? d.soh.toFixed(1)      : '--');
+    setText('p-odo',   d.odo      !== undefined ? d.odo.toFixed(1)      : '--');
+
+    // 6 chip cờ trạng thái
+    setChip('c-kick',  d.is_kickstand, 'on-kick');
+    setChip('c-park',  d.is_park,      'on-park');
+    setChip('c-ready', d.is_ready,     'on-ready');
+    setChip('c-brake', d.is_brake,     'on-brake');
+    setChip('c-eco',   d.is_eco,       'on-eco');
+    setChip('c-sport', d.is_sport,     'on-sport');
+
+    // Theme tự động theo cờ CAN
+    applyMode(d.is_sport ? 'sport' : (d.is_eco ? 'eco' : 'comfort'));
+});
+</script>
+</body>
+</html>

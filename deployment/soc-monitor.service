@@ -1,0 +1,20 @@
+[Unit]
+Description=VinFast Evo 200 SoC/Range Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/soc-monitor
+ExecStart=/usr/bin/python3 -m src.main
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits
+MemoryLimit=500M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast, pathlib; ast.parse\\(pathlib.Path\\('src/can_reader/reader.py'\\).read_text\\(encoding='utf-8'\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python3 -m py_compile tests/test_integration.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'feat: Tasks 23-28 complete — training, export, integration, deployment, docs *)",
+      "Bash(pip install *)",
+      "Bash(python3 verify_coulomb_bias.py)",
+      "Bash(pip3 install *)",
+      "Bash(python -m pip install numpy pandas pyyaml flask flask-socketio pyserial python-can)",
+      "Bash(python3 -m pip install numpy pandas pyyaml flask flask-socketio pyserial python-can --quiet)",
+      "Bash(git commit *)",
+      "Bash(grep \"\\\\[1Hz\\\\]\" /tmp/mock_smooth.log | head -20)",
+      "Read(//tmp/**)",
+      "Bash(kill 1957)",
+      "Bash(kill 227 228)",
+      "Bash(MOCK_CAN=1 MOCK_CSV_START_ROW=513 python -m src.main)",
+      "Bash(echo \"PID=$!\")",
+      "Bash(netstat -ano)",
+      "Bash(kill 1792)",
+      "Bash(taskkill /PID 26360 /F)",
+      "Read(//d/DoAn/**)"
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+# ============================================================
+# Thông số kỹ thuật pin VinFast Evo 200 Lite
+# (Battery Specifications)
+# ============================================================
+# Dùng bởi: src/coulomb_counter/counter.py, src/range_estimator/estimator.py
+# Nguồn: đo thực nghiệm từ dataset 15 file Evo200_Mixed*.csv
+#         + thông số nameplate xe.
+
+# ------------------------------------------------------------
+# Dung lượng pin (Capacity)
+# ------------------------------------------------------------
+capacity:
+  # Dung lượng nameplate từ nhà sản xuất
+  nominal_ah: 32.0
+
+  # Dung lượng hiệu chỉnh đo từ dữ liệu thực tế (Coulomb Counting)
+  # Tính từ cycle xả gần đầy (SOC ~100%) → gần cạn (SOC ~5%)
+  # effective_ah = Q_eff = nominal_ah * SoH / 100
+  effective_ah: 30.65
+
+# ------------------------------------------------------------
+# State of Health (SoH) — Tình trạng sức khỏe pin
+# ------------------------------------------------------------
+# Đo thực nghiệm: SoH = Q_eff / Q_nom = 30.65 / 32.0 = 95.8%
+# Pin còn khỏe, hao mòn nhẹ (~4.2%).
+soh_initial_pct: 95.8
+
+# ------------------------------------------------------------
+# Điện áp pack (Pack Voltage)
+# ------------------------------------------------------------
+# Xe VinFast Evo 200 Lite dùng hệ 72V (thực tế 60–80V tùy SoC).
+voltage:
+  nominal_v: 72.0         # V — điện áp định mức
+  min_v: 60.0             # V — điện áp tối thiểu (SoC ~0%)
+  max_v: 80.0             # V — điện áp tối đa (SoC ~100%)
+
+# ------------------------------------------------------------
+# Năng lượng pack (Pack Energy)
+# ------------------------------------------------------------
+# Pack capacity (Wh) = Điện áp định mức (V) × Dung lượng hiệu chỉnh (Ah)
+# = 72V × 30.65Ah = 2206.8 Wh ≈ 2.21 kWh
+# Dùng trong range_estimator: năng lượng khả dụng tại SoC hiện tại.
+pack_capacity_wh: 2206.8
+
+# ------------------------------------------------------------
+# Ngưỡng reset Coulomb Counter
+# ------------------------------------------------------------
+# Khi xe cắm sạc và SOC BMS trở về ~100%, reset Coulomb Counter
+# để tránh tích lũy drift theo thời gian.
+coulomb_counter:
+  reset_on_charge_complete: true
+  charge_complete_soc_pct: 98.0   # % — coi như đã sạc đầy khi SOC BMS >= 98%

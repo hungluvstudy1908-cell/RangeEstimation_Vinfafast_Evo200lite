@@ -1,0 +1,23 @@
+inference:
+  batch_size: 1
+  confidence_threshold: 0.7
+  window_step: 1
+label_scale: 100.0
+model:
+  num_features: 4
+  num_outputs: 2
+  tflite_path: models/soc_cnn1d.tflite
+  window_size: 60
+normalization:
+  pack_current_a:
+    max: 21.22
+    min: -2.26
+  pack_voltage_v:
+    max: 73.818
+    min: 69.882
+  speed_kmh:
+    max: 54.1
+    min: 0.0
+  temp_c:
+    max: 46.0
+    min: 0.0

@@ -1,0 +1,54 @@
+# ============================================================
+# Cấu hình tiền xử lý dữ liệu (Preprocessing Configuration)
+# ============================================================
+# Dùng bởi: src/preprocessing/loader.py, src/preprocessing/windowing.py
+# Thay đổi tham số tại đây — KHÔNG hardcode trong code.
+
+# ------------------------------------------------------------
+# Sensor Startup — bỏ qua sample đầu khi BMS/cảm biến chưa init
+# ------------------------------------------------------------
+# Quan sát thực tế: vài giây đầu phiên đo, BMS chưa init xong
+# nên SOC = 0 và Nhiệt độ = 0, không phản ánh giá trị thật.
+# Bỏ qua tất cả row đầu cho đến khi đồng thời thỏa cả hai điều kiện.
+startup:
+  min_soc_bms_pct: 5      # % — SOC BMS phải >= giá trị này
+  min_temp_c: 10          # °C — Nhiệt độ pin phải >= giá trị này
+
+# ------------------------------------------------------------
+# Cổng lọc giá trị vật lý (Gate / Sanity Check)
+# ------------------------------------------------------------
+# Các giá trị vượt ngoài khoảng này là lỗi sensor hoặc CAN frame hỏng.
+# Dùng để cleaning cả training CSV lẫn runtime CAN frame.
+gate:
+  pack_voltage_v:
+    min: 60.0             # V — dưới ngưỡng này pin gần cạn hoàn toàn
+    max: 80.0             # V — trên ngưỡng này là bất thường
+  pack_current_a:
+    min: -25.0            # A — giới hạn dòng sạc tối đa (âm = sạc sau khi flip)
+    max: 35.0             # A — giới hạn dòng xả tối đa (dương = xả)
+  temp_c:
+    min: -10.0            # °C
+    max: 60.0             # °C
+  speed_kmh:
+    min: 0.0              # km/h
+    max: 80.0             # km/h — Evo200 Lite tốc độ tối đa ~55 km/h
+
+# ------------------------------------------------------------
+# Windowing — tham số tạo dataset cho CNN1D
+# ------------------------------------------------------------
+# Dữ liệu phải được resample về 1Hz trước khi tạo window.
+# window_size = 60 → mỗi mẫu training là 60 giây lịch sử.
+windowing:
+  window_size: 60         # số timestep mỗi cửa sổ (giây, sau khi resample 1Hz)
+  step: 1                 # bước nhảy giữa các cửa sổ liên tiếp
+                          # step=1: fully overlapping (tối đa hóa dataset)
+                          # step=window_size: non-overlapping (dataset nhỏ hơn)
+
+# ------------------------------------------------------------
+# Resample — đồng nhất sample rate về 1Hz
+# ------------------------------------------------------------
+# Dataset Evo200 có sample rate ~7Hz không đều.
+# Model CNN1D cần input rate đều → resample về 1Hz trước khi tạo window.
+resample:
+  target_hz: 1            # Hz — tần số sau khi resample
+  method: "mean"          # "mean" hoặc "first" — cách tổng hợp trong mỗi giây
