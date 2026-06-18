@@ -187,7 +187,13 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
     <!-- Cột phải: range lớn + hàng 3 metric (nhiệt độ / SoH / odo) -->
     <div class="side r">
       <div class="lbl">range còn lại</div>
-      <div class="v1"><span id="p-range">--</span><span style="font-size:15px"> km</span></div>
+      <div class="v1"><span id="p-range-bms">--</span><span style="font-size:15px"> km</span></div>
+      <div class="v2" style="color:#FBBF24;margin-top:12px">
+        #2 Coulomb &nbsp;<span id="p-range-cc">--</span> km
+      </div>
+      <div class="v2" style="color:#FB7185;margin-top:5px">
+        #3 CNN1D &nbsp;<span id="p-range-model">--</span> km
+      </div>
       <div class="metrics-row">
         <div class="metric-card">
           <div class="lbl">nhiệt độ</div>
@@ -314,7 +320,9 @@ socket.on('update_dash', function(d){
     setText('pp-model', d.soc_model !== undefined ? d.soc_model.toFixed(1)+ '%' : '--%');
 
     // Stats
-    setText('p-range', d.range_km !== undefined ? d.range_km.toFixed(1) : '--');
+    setText('p-range-bms',   d.range_bms   !== undefined ? d.range_bms.toFixed(1)   : '--');
+    setText('p-range-cc',    d.range_cc    !== undefined ? d.range_cc.toFixed(1)    : '--');
+    setText('p-range-model', d.range_model !== undefined ? d.range_model.toFixed(1) : '--');
     setText('p-temp',  d.temp     !== undefined ? d.temp                : '--');
     setText('p-soh',   d.soh      !== undefined ? d.soh.toFixed(1)      : '--');
     setText('p-odo',   d.odo      !== undefined ? d.odo.toFixed(1)      : '--');

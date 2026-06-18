@@ -26,10 +26,12 @@ import yaml
 from src.can_reader.reader import WaveshareReader
 from src.can_reader.decoder import decode as decode_can
 from src.coulomb_counter.counter import CoulombCounter
+from src.gps.reader import GpsReader
 from src.logger.writer import RuntimeLogger
 from src.preprocessing.normalize import apply_minmax
 from src.range_estimator.estimator import RangeEstimator
 from src.soc_inference.inference import SocInference
+from src.soh_estimator.estimator import SohEstimator
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +95,20 @@ class SharedState:
     # State of Health (updated 1Hz)
     soh: float = 95.8
 
-    # Range estimation (updated 1Hz)
+    # Range estimation (updated 1Hz) — range_km giữ alias = range_model (tương thích cũ)
     range_km: float = 0.0
+    range_bms: float = 0.0
+    range_cc: float = 0.0
+    range_model: float = 0.0
     wh_per_km: float = 50.0
+
+    # GPS (updated 1Hz, từ VK-162 — None nếu chưa có fix hoặc GPS không cắm)
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
+    gps_speed_kmh: float = 0.0
+    gps_fix: int = 0
+    gps_sats: int = 0
+    gps_distance_km: float = 0.0
 
     # Sai số tức thời & MAE trượt so với BMS (tính 1Hz)
     err_model: float = 0.0   # soc_model - soc_bms (có dấu)
@@ -162,7 +175,16 @@ class SharedState:
             "soc_model": self.soc_model,
             "soh": self.soh,
             "range_km": self.range_km,
+            "range_bms": self.range_bms,
+            "range_cc": self.range_cc,
+            "range_model": self.range_model,
             "wh_per_km": self.wh_per_km,
+            "gps_lat": self.gps_lat,
+            "gps_lon": self.gps_lon,
+            "gps_speed_kmh": self.gps_speed_kmh,
+            "gps_fix": self.gps_fix,
+            "gps_sats": self.gps_sats,
+            "gps_distance_km": self.gps_distance_km,
             "pack_power_w": self.pack_power_w,
             "cell_data": list(self.cell_data),
             "is_kickstand": self.is_kickstand,
@@ -185,12 +207,14 @@ class SharedState:
 # ============================================================================
 
 
-def init_system() -> Tuple[WaveshareReader, CoulombCounter, SocInference, RangeEstimator, RuntimeLogger]:
+def init_system() -> Tuple[WaveshareReader, CoulombCounter, SocInference, SohEstimator, Dict[str, RangeEstimator], RuntimeLogger, GpsReader]:
     """
     Khởi tạo tất cả modules.
 
     Returns:
-        Tuple (can_reader, coulomb_counter, soc_inference, range_estimator, logger)
+        Tuple (can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, logger, gps_reader)
+        range_estimators là dict {"bms", "cc", "model"} — mỗi nguồn SoC một
+        instance riêng vì EWMA/warmup/freeze là trạng thái nội bộ per-instance.
 
     Raises:
         Exception: Nếu khởi tạo bất kỳ module nào thất bại.
@@ -223,16 +247,25 @@ def init_system() -> Tuple[WaveshareReader, CoulombCounter, SocInference, RangeE
     soc_inference = SocInference(model_path="models/soc_cnn1d.tflite", label_scale=_label_scale)
     logger.info(f"✓ SoC Inference (CNN1D) initialized  label_scale={_label_scale}")
 
-    # Range Estimator
-    range_estimator = RangeEstimator()
-    logger.info("✓ Range Estimator initialized")
+    # SoH Estimator — kinh nghiệm theo odo, tham số từ model.yaml mục soh:
+    soh_estimator = SohEstimator.from_config()
+    logger.info("✓ SoH Estimator initialized (odo-based)")
+
+    # Range Estimators — 3 instance riêng cho BMS/CC/Model (EWMA/warmup/freeze per-instance)
+    range_estimators = {"bms": RangeEstimator(), "cc": RangeEstimator(), "model": RangeEstimator()}
+    logger.info("✓ Range Estimators initialized (bms/cc/model)")
 
     # Runtime CSV Logger
     runtime_logger = RuntimeLogger()
     logger.info("✓ CSV Logger initialized")
 
+    # GPS Reader (VK-162) — không chặn nếu GPS không cắm, xem reader.py
+    gps_reader = GpsReader()
+    gps_reader.start()
+    logger.info("✓ GPS Reader started")
+
     logger.info("System initialization complete ✓")
-    return can_reader, coulomb_counter, soc_inference, range_estimator, runtime_logger
+    return can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, runtime_logger, gps_reader
 
 
 # ============================================================================
@@ -244,8 +277,10 @@ def main_loop(
     can_reader: WaveshareReader,
     coulomb_counter: CoulombCounter,
     soc_inference: SocInference,
-    range_estimator: RangeEstimator,
+    soh_estimator: SohEstimator,
+    range_estimators: Dict[str, RangeEstimator],
     runtime_logger: RuntimeLogger,
+    gps_reader: GpsReader,
     state: SharedState,
     lock: threading.Lock,
     socketio=None,
@@ -255,14 +290,16 @@ def main_loop(
 
     Cấu trúc:
       - Mỗi tick 100ms: CAN read + decode + update SoC#1, SoC#2 + emit SocketIO
-      - Mỗi 10 tick (1 giây): resample + inference + range + log
+      - Mỗi 10 tick (1 giây): resample + SoC#3 (CNN1D) + SoH (odo) + 3 range + GPS + log
 
     Args:
         can_reader: WaveshareReader instance.
         coulomb_counter: CoulombCounter instance.
         soc_inference: SocInference instance.
-        range_estimator: RangeEstimator instance.
+        soh_estimator: SohEstimator instance.
+        range_estimators: Dict {"bms", "cc", "model"} → RangeEstimator instance riêng.
         runtime_logger: RuntimeLogger instance (CSV writer).
+        gps_reader: GpsReader instance (đọc nền, không chặn nếu không có GPS).
         state: SharedState (protected by lock).
         lock: threading.Lock để sync access với web server.
         socketio: SocketIO instance để push events, None nếu không dùng.
@@ -352,6 +389,9 @@ def main_loop(
                         "odo": round(state.odo_km, 1),
                         "power": round(state.pack_power_w, 1),
                         "range_km": round(state.range_km, 1),
+                        "range_bms": round(state.range_bms, 1),
+                        "range_cc": round(state.range_cc, 1),
+                        "range_model": round(state.range_model, 1),
                         "soh": round(state.soh, 1),
                         "is_kickstand": state.is_kickstand,
                         "is_park":      state.is_park,
@@ -395,6 +435,9 @@ def main_loop(
                 # Read state buffers (locked, fast)
                 with lock:
                     v_arr, i_arr, spd_arr, tmp_arr = state.get_buffers_as_arrays()
+                    soc_bms_now = state.soc_bms   # snapshot cho warm-up fallback + range BMS
+                    soc_cc_snap = state.soc_cc    # snapshot cho range CC
+                    odo_km_now  = state.odo_km    # snapshot cho SohEstimator
 
                     if len(v_arr) < 2:
                         # Not enough samples yet
@@ -427,23 +470,58 @@ def main_loop(
                 # Channels-last batch cho TFLite: (1, window_size, 4)
                 window_batch = window_norm[np.newaxis, :]  # (1, 60, 4) channels-last
 
-                # SoC #3: CNN1D model inference (locked after)
-                soc_model, soh = soc_inference.predict(window_batch)
+                # SoC #3: CNN1D model inference
+                soc_model = soc_inference.predict(window_batch)
 
-                # Range estimation
-                range_km, wh_per_km = range_estimator.update_and_estimate(
+                # Warm-up gate (1.2): chỉ dùng model khi đã có ≥60 sample thật.
+                # Khi buffer chưa đầy, cạnh padding làm model thấy dữ liệu giả → sai lệch lớn.
+                has_real_samples = len(v_arr) >= window_size
+                if not has_real_samples:
+                    soc_model = soc_bms_now  # giữ BMS làm fallback trong warm-up
+
+                # SoH từ odo (1.1): tách hoàn toàn khỏi CNN1D
+                soh = soh_estimator.estimate(odo_km_now)
+
+                # Range estimation — 3 nguồn SoC, dùng chung speed/current window + SoH
+                # (consumption độc lập nguồn SoC, xem range_estimator.py)
+                range_model, wh_per_km = range_estimators["model"].update_and_estimate(
                     soc_pct=soc_model,
                     soh_pct=soh,
                     speed_window=spd_pad[-60:],  # Last 60 from padded array
                     current_window=i_pad[-60:],
                 )
+                range_bms, _ = range_estimators["bms"].update_and_estimate(
+                    soc_pct=soc_bms_now,
+                    soh_pct=soh,
+                    speed_window=spd_pad[-60:],
+                    current_window=i_pad[-60:],
+                )
+                range_cc, _ = range_estimators["cc"].update_and_estimate(
+                    soc_pct=soc_cc_snap,
+                    soh_pct=soh,
+                    speed_window=spd_pad[-60:],
+                    current_window=i_pad[-60:],
+                )
+
+                # GPS snapshot — đồng bộ theo state.timestamp (mốc chung của row 1Hz)
+                gps_snapshot = gps_reader.get_latest()
 
                 # Write results + tính sai số & MAE (locked, fast)
                 with lock:
                     state.soc_model = soc_model
                     state.soh = soh
-                    state.range_km = range_km
-                    state.wh_per_km = wh_per_km
+                    state.range_model = range_model
+                    state.range_bms   = range_bms
+                    state.range_cc    = range_cc
+                    state.range_km    = range_model   # alias giữ tương thích display/logger cũ
+                    state.wh_per_km   = wh_per_km
+
+                    state.gps_lat = gps_snapshot["lat"]
+                    state.gps_lon = gps_snapshot["lon"]
+                    state.gps_speed_kmh = gps_snapshot["speed_kmh"]
+                    state.gps_fix = gps_snapshot["fix"]
+                    state.gps_sats = gps_snapshot["sats"]
+                    state.gps_distance_km = gps_snapshot["distance_km"]
 
                     # Sai số tức thời so với BMS (ground truth)
                     err_model = soc_model - state.soc_bms
@@ -484,7 +562,8 @@ def main_loop(
                 logger.info(
                     f"[1Hz] SoC: BMS={state.soc_bms:.1f}%, "
                     f"CC={state.soc_cc:.1f}%, Model={state.soc_model:.1f}% | "
-                    f"Range={state.range_km:.1f}km | SoH={state.soh:.1f}% | "
+                    f"Range: BMS={state.range_bms:.1f} CC={state.range_cc:.1f} "
+                    f"Model={state.range_model:.1f} km | SoH={state.soh:.1f}% | "
                     f"Log: {runtime_logger.get_row_count()} rows, {runtime_logger.get_file_size_mb():.1f}MB"
                 )
 
@@ -583,7 +662,7 @@ def main() -> None:
 
     # Initialize all modules
     try:
-        can_reader, coulomb_counter, soc_inference, range_estimator, runtime_logger = init_system()
+        can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, runtime_logger, gps_reader = init_system()
     except Exception as e:
         logger.error(f"Initialization failed: {e}")
         return
@@ -597,8 +676,10 @@ def main() -> None:
             can_reader,
             coulomb_counter,
             soc_inference,
-            range_estimator,
+            soh_estimator,
+            range_estimators,
             runtime_logger,
+            gps_reader,
             state,
             lock,
             socketio,
@@ -606,6 +687,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         can_reader.disconnect()
+        gps_reader.stop()
         logger.info("Goodbye!")
 
 

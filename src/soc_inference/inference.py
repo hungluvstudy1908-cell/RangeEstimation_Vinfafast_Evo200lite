@@ -11,16 +11,15 @@ Mô hình nhận input:
 
 Output:
   - soc_model: State of Charge ước lượng (%, 0–100)
-  - soh (nếu mô hình có 2 outputs): State of Health (%, 0–100)
 
 Lưu ý:
+  - Mô hình chỉ có 1 output (SoC). SoH do SohEstimator đảm nhận riêng.
   - Mô hình yêu cầu input đã được normalize (xem src/preprocessing/normalize.py).
   - Không tự thực hiện preprocessing — caller đảm bảo window đã sẵn sàng.
 """
 
 import logging
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
 
@@ -44,7 +43,7 @@ class SocInference:
         soc_model = SocInference(model_path="models/soc_cnn1d.tflite")
         ...
         # window: shape (60, 4) — đã normalize
-        soc_pred, soh_pred = soc_model.predict(window)
+        soc_pred = soc_model.predict(window)   # SoH tách riêng → SohEstimator
     """
 
     def __init__(self, model_path: str = None, label_scale: float = 1.0):
@@ -116,21 +115,21 @@ class SocInference:
             self._input_details = None
             self._output_details = None
 
-    def predict(self, window: np.ndarray) -> Tuple[float, float]:
+    def predict(self, window: np.ndarray) -> float:
         """
         Ước lượng SoC từ một cửa sổ dữ liệu.
 
+        SoH không trả về ở đây — do SohEstimator đảm nhận theo odo.
+
         Args:
-            window: numpy array shape (window_size, 4):
+            window: numpy array shape (window_size, 4) hoặc (1, window_size, 4):
                    - [:, 0] = pack_voltage_v (đã normalize)
                    - [:, 1] = pack_current_a (đã normalize)
                    - [:, 2] = temp_c (đã normalize)
                    - [:, 3] = speed_kmh (đã normalize)
 
         Returns:
-            Tuple[soc_model, soh_model]:
-            - soc_model: SoC ước lượng (%, 0–100)
-            - soh_model: SoH ước lượng (%, 0–100). Trả về 100.0 nếu mô hình không có output SoH.
+            soc_model: SoC ước lượng (%, 0–100).
 
         Raises:
             ValueError: Nếu window shape không đúng.
@@ -142,12 +141,10 @@ class SocInference:
 
         # Chế độ demo nếu không có mô hình thực
         if self._interpreter is None:
-            logger.debug("Chế độ demo: trả về dummy SoC + SoH")
-            # Trả về giá trị từ dòng điện trung bình để có vẻ hợp lý
+            logger.debug("Chế độ demo: trả về dummy SoC")
             avg_current = window[:, 1].mean()
             dummy_soc = 50.0 + avg_current * 5.0  # Heuristic đơn giản
-            dummy_soc = np.clip(dummy_soc, 0.0, 100.0)
-            return float(dummy_soc), 100.0
+            return float(np.clip(dummy_soc, 0.0, 100.0))
 
         # Chuẩn bị input: thêm batch dimension nếu cần
         input_data = window.astype(np.float32)
@@ -158,26 +155,13 @@ class SocInference:
         self._interpreter.set_tensor(self._input_details[0]["index"], input_data)
         self._interpreter.invoke()
 
-        # Lấy output
-        # Output 0: SoC (thường là duy nhất)
-        # Output 1 (nếu có): SoH
         soc_output = self._interpreter.get_tensor(self._output_details[0]["index"])
         soc_model = float(np.squeeze(soc_output))
 
         # Chuyển [0,1] → % nếu label đã /100 khi train (label_scale=100.0)
         soc_model = soc_model * self._label_scale
 
-        # Clamp vào [0, 100]
-        soc_model = np.clip(soc_model, 0.0, 100.0)
-
-        # Kiểm tra có output SoH không
-        soh_model = 100.0
-        if len(self._output_details) > 1:
-            soh_output = self._interpreter.get_tensor(self._output_details[1]["index"])
-            soh_model = float(np.squeeze(soh_output))
-            soh_model = np.clip(soh_model, 0.0, 100.0)
-
-        return soc_model, soh_model
+        return float(np.clip(soc_model, 0.0, 100.0))
 
     def get_model_info(self) -> dict:
         """

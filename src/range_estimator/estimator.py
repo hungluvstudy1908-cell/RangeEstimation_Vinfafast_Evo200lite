@@ -245,11 +245,14 @@ class RangeEstimator:
         # Đọc tham số làm mượt từ config (với fallback hardcode)
         _sm = _RANGE_CONFIG.get("smoothing", {})
         self.v_min_kmh        = float(_sm.get("v_min_kmh",        5.0))
-        self.wh_per_km_min    = float(_sm.get("wh_per_km_min",   18.0))
-        self.wh_per_km_max    = float(_sm.get("wh_per_km_max",   60.0))
+        self.wh_per_km_min    = float(_sm.get("wh_per_km_min",   12.0))
+        self.wh_per_km_max    = float(_sm.get("wh_per_km_max",   80.0))
         self.range_ewma_alpha = float(_sm.get("range_ewma_alpha",  0.05))
         self.range_km_max     = float(_sm.get("range_km_max",    120.0))
         self.range_ewma       = None   # seed lần đầu từ range_raw, không bò từ 0
+        # Warm-up: giữ range ổn định trong N tick đầu trước khi EWMA hội tụ
+        self.warmup_ticks  = int(_sm.get("warmup_ticks", 45))
+        self._call_count   = 0
 
         logger.info(
             f"RangeEstimator khởi tạo: capacity={pack_capacity_wh:.1f}Wh, alpha={ewma_alpha}"
@@ -292,6 +295,8 @@ class RangeEstimator:
             - range_km: Quãng đường ước lượng đã làm mượt / đóng băng (km).
             - wh_per_km_ewma: Mức tiêu thụ EWMA hiện tại (Wh/km), dùng để log.
         """
+        self._call_count += 1
+
         avg_current = float(np.mean(current_window))
         avg_speed   = float(np.mean(speed_window))
 
@@ -332,6 +337,8 @@ class RangeEstimator:
 
         if self.range_ewma is None:
             self.range_ewma = range_raw          # seed từ giá trị thật, không bò từ 0
+        elif self._call_count <= self.warmup_ticks:
+            pass                                 # warm-up: giữ nguyên seed, không EWMA
         else:
             a = self.range_ewma_alpha
             self.range_ewma = a * range_raw + (1.0 - a) * self.range_ewma
@@ -351,4 +358,5 @@ class RangeEstimator:
             "pack_capacity_wh": self.pack_capacity_wh,
             "ewma_alpha": self.ewma_alpha,
             "range_ewma_alpha": self.range_ewma_alpha,
+            "warmup_done": self._call_count > self.warmup_ticks,
         }

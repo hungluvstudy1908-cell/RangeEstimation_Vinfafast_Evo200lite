@@ -5,9 +5,15 @@ inference:
 label_scale: 100.0
 model:
   num_features: 4
-  num_outputs: 2
+  num_outputs: 1
   tflite_path: models/soc_cnn1d.tflite
   window_size: 60
+soh:
+  # Ước lượng SoH kinh nghiệm theo quãng đường — thay bằng Coulomb khi có đủ dữ liệu cycle
+  # odo=12842 km, km_per_full_charge=70 → ~183 chu kỳ → SoH ≈ 98.8%
+  km_per_full_charge: 70.0
+  fade_pct_per_cycle: 0.0067
+  soh_floor: 80.0
 normalization:
   pack_current_a:
     max: 21.22

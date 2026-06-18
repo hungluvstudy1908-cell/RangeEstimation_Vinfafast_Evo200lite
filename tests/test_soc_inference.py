@@ -31,20 +31,18 @@ def test_init_demo_mode():
 
 
 def test_predict_demo_mode():
-    """predict() ở chế độ demo trả về dummy values hợp lý."""
+    """predict() ở chế độ demo trả về dummy SoC hợp lý."""
     soc_inf = SocInference(model_path="/nonexistent/model.tflite")
 
     # Tạo dummy window (60, 4)
     window = np.random.randn(60, 4).astype(np.float32)
 
-    # Gọi predict
-    soc, soh = soc_inf.predict(window)
+    # Gọi predict — chỉ trả về SoC (SoH tách ra SohEstimator)
+    soc = soc_inf.predict(window)
 
     # Kiểm tra output
     assert isinstance(soc, float)
-    assert isinstance(soh, float)
     assert 0.0 <= soc <= 100.0, f"SoC out of range: {soc}"
-    assert 0.0 <= soh <= 100.0, f"SoH out of range: {soh}"
     print("[OK] Demo mode prediction works")
 
 
@@ -68,10 +66,9 @@ def test_predict_with_batch_dim():
 
     # Window (60, 4) — không có batch dimension
     window = np.random.randn(60, 4).astype(np.float32)
-    soc, soh = soc_inf.predict(window)
+    soc = soc_inf.predict(window)
 
     assert 0.0 <= soc <= 100.0
-    assert 0.0 <= soh <= 100.0
     print("[OK] Batch dimension handling")
 
 
@@ -92,10 +89,9 @@ def test_predict_bounds():
     # Thử các input khác nhau
     for i in range(10):
         window = np.random.randn(60, 4).astype(np.float32)
-        soc, soh = soc_inf.predict(window)
+        soc = soc_inf.predict(window)
 
         assert 0.0 <= soc <= 100.0
-        assert 0.0 <= soh <= 100.0
 
     print("[OK] Bounds clamping (10 iterations)")
 

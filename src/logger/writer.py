@@ -51,6 +51,9 @@ class RuntimeLogger:
         "soc_model",  # SoC #3
         "soh",
         "range_km",
+        "range_bms",
+        "range_cc",
+        "range_model",
         "wh_per_km",
         "is_kickstand",
         "is_ready",
@@ -62,6 +65,12 @@ class RuntimeLogger:
         "err_cc",      # soc_cc    - soc_bms (có dấu, %)
         "mae_model",   # MAE trượt 60s |err_model|
         "mae_cc",      # MAE trượt 60s |err_cc|
+        "gps_lat",
+        "gps_lon",
+        "gps_speed_kmh",
+        "gps_fix",
+        "gps_sats",
+        "gps_distance_km",
     ]
 
     def __init__(self, output_dir: Optional[Path] = None):
@@ -130,6 +139,9 @@ class RuntimeLogger:
                 "soc_model": round(state.soc_model, 1),
                 "soh": round(state.soh, 1),
                 "range_km": round(state.range_km, 1),
+                "range_bms":   round(getattr(state, "range_bms",   0.0), 1),
+                "range_cc":    round(getattr(state, "range_cc",    0.0), 1),
+                "range_model": round(getattr(state, "range_model", 0.0), 1),
                 "wh_per_km": round(state.wh_per_km, 1),
                 "is_kickstand": state.is_kickstand,
                 "is_ready":     state.is_ready,
@@ -141,6 +153,12 @@ class RuntimeLogger:
                 "err_cc":       round(getattr(state, "err_cc",     0.0), 2),
                 "mae_model":    round(getattr(state, "mae_model",  0.0), 2),
                 "mae_cc":       round(getattr(state, "mae_cc",     0.0), 2),
+                "gps_lat":      getattr(state, "gps_lat", None),  # None = chưa có fix
+                "gps_lon":      getattr(state, "gps_lon", None),
+                "gps_speed_kmh": round(getattr(state, "gps_speed_kmh", 0.0), 1),
+                "gps_fix":      getattr(state, "gps_fix", 0),
+                "gps_sats":     getattr(state, "gps_sats", 0),
+                "gps_distance_km": getattr(state, "gps_distance_km", 0.0),
             }
 
             # Append row to CSV

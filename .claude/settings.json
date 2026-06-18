@@ -22,7 +22,20 @@
       "Bash(netstat -ano)",
       "Bash(kill 1792)",
       "Bash(taskkill /PID 26360 /F)",
-      "Read(//d/DoAn/**)"
+      "Read(//d/DoAn/**)",
+      "Bash(python -c \"import pynmea2\")",
+      "Bash(MOCK_CAN=1 timeout 8 python -m src.main)",
+      "Bash(MOCK_CAN=1 python -m src.main)",
+      "Bash(curl -s http://127.0.0.1:5000/api/state)",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\({k:v for k,v in d.items\\(\\) if k.startswith\\('gps'\\)}\\)\")",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\({k:v for k,v in d.items\\(\\) if 'range' in k or k in \\('soc_bms','soc_cc','soc_model'\\)}\\)\")",
+      "Bash(MOCK_CAN=1 timeout 35 python -m src.main)",
+      "Bash(awk -F'Range: BMS=' '{print $2}')",
+      "Bash(awk '{print $1, $3, $5}')",
+      "Bash(MOCK_CAN=1 timeout 75 python -m src.main)",
+      "Bash(node --check /tmp/inline.js)"
     ]
   }
 }
