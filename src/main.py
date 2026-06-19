@@ -109,6 +109,9 @@ class SharedState:
     gps_fix: int = 0
     gps_sats: int = 0
     gps_distance_km: float = 0.0
+    route_total_km: float = 40.0
+    route_error_km: float = 40.0
+
 
     # Sai số tức thời & MAE trượt so với BMS (tính 1Hz)
     err_model: float = 0.0   # soc_model - soc_bms (có dấu)
@@ -523,6 +526,19 @@ def main_loop(
                     state.gps_sats = gps_snapshot["sats"]
                     state.gps_distance_km = gps_snapshot["distance_km"]
 
+                    # ========================================================
+                    # [THÊM MỚI TẠI ĐÂY 1] Tính sai số lộ trình (x - gps)
+                    # Giả sử bạn đã khởi tạo state.route_total_km = 40.0 (hoặc độ dài lộ trình của bạn)
+                    # trong class SharedState
+                    # ========================================================
+                    # Lấy tổng lộ trình, nếu chưa khai báo thì mặc định là 40km
+                    total_route = getattr(state, 'route_total_km', 40.0) 
+                    state.route_error_km = round(total_route - state.gps_distance_km, 3)
+                    # Đảm bảo sai số không bị âm nếu xe chạy quá lộ trình dự kiến
+                    if state.route_error_km < 0:
+                        state.route_error_km = 0.0
+                    # ========================================================
+
                     # Sai số tức thời so với BMS (ground truth)
                     err_model = soc_model - state.soc_bms
                     err_cc    = state.soc_cc - state.soc_bms
@@ -543,6 +559,40 @@ def main_loop(
                     state.mae_model = mae_model
                     state.mae_cc    = mae_cc
                     state.mae_warm  = mae_warm
+                
+                Kết thúc with lock
+                
+                # ========================================================
+                # [THÊM MỚI TẠI ĐÂY 2] Ghi dữ liệu ra file CSV
+                # Thực hiện NGOÀI khối lock để không block tiến trình đọc CAN
+                # ========================================================
+                # Chỉ ghi log khi đã bắt được tọa độ và xe đang thực sự di chuyển
+                if state.gps_lat is not None and state.gps_speed_kmh > 1.0:
+                    try:
+                        import csv
+                        import time
+                        import os
+                        
+                        csv_file = "comparison_results.csv"
+                        
+                        # Tạo header nếu file chưa tồn tại
+                        if not os.path.exists(csv_file):
+                            with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+                                writer = csv.writer(f)
+                                writer.writerow(["Timestamp", "Coulomb_Range_km", "CNN1D_Range_km", "Route_Error_km"])
+                        
+                        # Ghi dòng dữ liệu mới
+                        with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+                            writer = csv.writer(f)
+                            writer.writerow([
+                                time.strftime("%H:%M:%S"),
+                                round(state.range_cc, 2),
+                                round(state.range_model, 2),
+                                state.route_error_km
+                            ])
+                    except Exception as e:
+                        logger.error(f"Lỗi khi ghi file CSV so sánh: {e}")
+                # ========================================================
 
                 # Log to CSV (outside lock)
                 runtime_logger.write(state)
@@ -564,6 +614,7 @@ def main_loop(
                     f"CC={state.soc_cc:.1f}%, Model={state.soc_model:.1f}% | "
                     f"Range: BMS={state.range_bms:.1f} CC={state.range_cc:.1f} "
                     f"Model={state.range_model:.1f} km | SoH={state.soh:.1f}% | "
+                    f"GPS={state.gps_distance_km:.2f}km | Sai số={state.route_error_km:.2f}km | "
                     f"Log: {runtime_logger.get_row_count()} rows, {runtime_logger.get_file_size_mb():.1f}MB"
                 )
 

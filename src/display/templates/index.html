@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>VinFast Evo 200 — Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 <style>
 /* ── @property: transition màu accent + nền ── */
@@ -194,7 +196,7 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
       <div class="v2" style="color:#FB7185;margin-top:5px">
         #3 CNN1D &nbsp;<span id="p-range-model">--</span> km
       </div>
-      <div class="metrics-row">
+     <div class="metrics-row">
         <div class="metric-card">
           <div class="lbl">nhiệt độ</div>
           <div class="metric-val"><span id="p-temp">--</span><span class="metric-unit">°C</span></div>
@@ -207,15 +209,23 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
           <div class="lbl">odo</div>
           <div class="metric-val"><span id="p-odo">--</span><span class="metric-unit">km</span></div>
         </div>
+      </div> <div class="metrics-row">
+        <div class="metric-card">
+          <div class="lbl">GPS Odo</div>
+          <div class="metric-val"><span id="p-gps-dist">--</span><span class="metric-unit">km</span></div>
+        </div>
+        <div class="metric-card" style="border-color: rgba(255, 90, 60, 0.5);">
+          <div class="lbl" style="color: #FF5A3C;">Sai số (X-GPS)</div>
+          <div class="metric-val"><span id="p-route-error" style="color: #FF5A3C;">--</span><span class="metric-unit">km</span></div>
+        </div>
       </div>
-    </div>
-
+      <a href="/download-csv" target="_blank" style="display:block; text-align:center; margin-top:10px; padding:8px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.15); border-radius:7px; color:#e9eff3; text-decoration:none; font-size:12px; letter-spacing: 0.05em; transition:0.3s;" onmouseover="this.style.background='rgba(79, 168, 255, 0.15)'; this.style.borderColor='#4FA8FF'" onmouseout="this.style.background='rgba(255,255,255,0.05)'; this.style.borderColor='rgba(255,255,255,0.15)'">📥 TẢI LOG ĐÁNH GIÁ (CSV)</a>
+      </div> </div>```
   </div><!-- /row -->
 
   <!-- ── Power row: ring nhỏ + mode chip ── -->
-  <div class="powerrow">
+<div class="powerrow">
     <div class="ringwrap sm">
-      <!-- viewBox 150×150, r=66, C=2π×66≈414.69 -->
       <svg viewBox="0 0 150 150" aria-hidden="true">
         <circle class="fc" cx="75" cy="75" r="66"/>
         <circle class="fc" cx="75" cy="75" r="55"/>
@@ -229,12 +239,11 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
     <div class="feat" id="featChip">standard mode</div>
   </div>
 
-</div><!-- /cluster -->
-
-<script>
+  <div id="map-container" style="width:100%; height:400px; border-radius:10px; margin-top:20px; border: 1px solid rgba(255,255,255,.1); z-index: 1;background-color: #333;"></div>
+  </div><script>
 // ── Constants (1 chỗ — chỉnh khi biết đúng thông số Evo 200 Lite) ──
 var MAX_SPEED = 60;    // TODO: tốc độ tối đa (km/h)
-var MAX_POWER = 2000;  // TODO: công suất tối đa (W)
+var MAX_POWER = 1500;  // TODO: công suất tối đa (W)
 
 // Chu vi vòng: C = 2π × r
 var Cs = 2 * Math.PI * 105;  // speed ring r=105
@@ -303,6 +312,17 @@ function applyMode(m){
     setText('featChip', MODE[m].feat);
 }
 
+// ==========================================
+// THÊM MỚI TẠI ĐÂY: Khởi tạo Bản đồ Leaflet (Chỉ chạy 1 lần)
+// ==========================================
+var map = L.map('map-container').setView([10.823, 106.629], 15);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap'
+}).addTo(map);
+var mapMarker = null;
+var isMapInitialized = false;
+
 // ── update_dash handler ──
 socket.on('update_dash', function(d){
     // Arc: cập nhật dashoffset ngay (CSS transition .28s)
@@ -326,6 +346,33 @@ socket.on('update_dash', function(d){
     setText('p-temp',  d.temp     !== undefined ? d.temp                : '--');
     setText('p-soh',   d.soh      !== undefined ? d.soh.toFixed(1)      : '--');
     setText('p-odo',   d.odo      !== undefined ? d.odo.toFixed(1)      : '--');
+
+    // ==========================================
+    // THÊM MỚI TẠI ĐÂY: Cập nhật Text GPS & Vẽ Map
+    // ==========================================
+    setText('p-gps-dist',    d.gps_distance_km !== undefined ? d.gps_distance_km.toFixed(2) : '--');
+    setText('p-route-error', d.route_error_km  !== undefined ? d.route_error_km.toFixed(2)  : '--');
+
+    if(d.gps_lat && d.gps_lon) {
+        var newLatLng = new L.LatLng(d.gps_lat, d.gps_lon);
+        
+        if(!mapMarker) {
+            // Tạo marker mới nếu chưa có
+            mapMarker = L.marker(newLatLng).addTo(map);
+        } else {
+            // Di chuyển marker nếu đã có
+            mapMarker.setLatLng(newLatLng);
+        }
+        
+        // Pan (dịch chuyển) camera theo xe vào lần đầu tiên có tín hiệu
+        if(!isMapInitialized) {
+            map.setView(newLatLng, 16);
+            isMapInitialized = true;
+        } else {
+            map.panTo(newLatLng); // Xóa dòng này nếu bạn không muốn bản đồ tự động trượt theo xe
+        }
+    }
+    // ==========================================
 
     // 6 chip cờ trạng thái
     setChip('c-kick',  d.is_kickstand, 'on-kick');
