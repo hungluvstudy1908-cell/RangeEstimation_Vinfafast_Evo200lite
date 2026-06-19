@@ -51,6 +51,8 @@ CAN_BAUDRATE = 2_000_000  # 2 Mbps
 WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 5000
 
+PERF_DEBUG = os.environ.get("PERF_DEBUG") == "1"  # Đo hiệu năng main_loop, mặc định tắt
+
 
 # ============================================================================
 # SharedState — Dữ liệu chia sẻ giữa main loop và web server
@@ -320,12 +322,21 @@ def main_loop(
     mae_model_window = deque(maxlen=60)  # window MAE trượt 60s @1Hz
     mae_cc_window    = deque(maxlen=60)
 
+    # Biến tích lũy đo hiệu năng (chỉ dùng khi PERF_DEBUG=1)
+    _perf_last = time.monotonic()
+    _perf_ticks = 0
+    _perf_frames_max = 0
+    _perf_tick_ms_max = 0.0
+    _perf_emit_ms_max = 0.0
+
     while True:
         t0 = time.monotonic()
 
         # ~~100ms TICK: CAN read + decode + update SoC#1 (BMS) + SoC#2 (CC)~~
         try:
             frames = can_reader.read_frames()
+            if PERF_DEBUG:
+                _perf_frames_max = max(_perf_frames_max, len(frames))
 
             for frame in frames:
                 # Mock mode trả về decoded dict trực tiếp; hardware trả về (can_id, bytes)
@@ -393,6 +404,8 @@ def main_loop(
                     logger.info(f"Coulomb Counter reset to {state.soc_bms:.1f}%")
 
             # Emit dashboard MỘT LẦN MỖI TICK (không theo từng frame) — tránh bão tin nhắn khi chạy
+            if PERF_DEBUG:
+                _e0 = time.monotonic()
             if socketio is not None and tick % EMIT_EVERY_N_TICK == 0:
                 socketio.emit("update_dash", {
                     "speed": round(state.speed_kmh, 1),
@@ -427,6 +440,8 @@ def main_loop(
                         "power": round(state.pack_power_w, 1),
                         "cells": [round(c, 4) for c in state.cell_data],
                     })
+            if PERF_DEBUG:
+                _perf_emit_ms_max = max(_perf_emit_ms_max, (time.monotonic() - _e0) * 1000)
 
         except Exception as e:
             logger.warning(f"CAN read error: {e}, attempting reconnect...")
@@ -590,6 +605,21 @@ def main_loop(
             if tick_sum > 0:
                 with lock:
                     state.fps_actual = TICK_HZ / tick_sum
+
+        # Đo hiệu năng (PERF_DEBUG) — in tổng hợp ~1 lần/giây, không ảnh hưởng logic
+        if PERF_DEBUG:
+            _perf_ticks += 1
+            _perf_tick_ms_max = max(_perf_tick_ms_max, (time.monotonic() - t0) * 1000)
+            if time.monotonic() - _perf_last >= 1.0:
+                logger.info(
+                    "[PERF] loop_hz=%d frames/tick_max=%d tick_ms_max=%.1f emit_ms_max=%.1f",
+                    _perf_ticks, _perf_frames_max, _perf_tick_ms_max, _perf_emit_ms_max,
+                )
+                _perf_last = time.monotonic()
+                _perf_ticks = 0
+                _perf_frames_max = 0
+                _perf_tick_ms_max = 0.0
+                _perf_emit_ms_max = 0.0
 
         # Keep 10Hz timing
         sleep_time = max(0, TICK_DT - elapsed)
