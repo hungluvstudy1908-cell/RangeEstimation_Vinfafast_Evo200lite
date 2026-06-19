@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 TICK_HZ = 10  # Main loop frequency (Hz)
 TICK_DT = 1.0 / TICK_HZ  # Time per tick (seconds)
 INFERENCE_EVERY_N_TICK = 10  # Inference every 1 second
-EMIT_EVERY_N_TICK = 1   # Emit dashboard mỗi N tick (1=10Hz, 2=5Hz, 5=2Hz). Tăng nếu mạng yếu.
+EMIT_EVERY_N_TICK = 10   # Emit dashboard mỗi N tick (1=10Hz, 2=5Hz, 5=2Hz). Tăng nếu mạng yếu.
 RING_BUFFER_SIZE = 60  # Keep 6 seconds of data at 10Hz (needed by range_estimator)
 
 CAN_PORT = "/dev/ttyUSB0"  # Waveshare USB-CAN port
