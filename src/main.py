@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 TICK_HZ = 10  # Main loop frequency (Hz)
 TICK_DT = 1.0 / TICK_HZ  # Time per tick (seconds)
 INFERENCE_EVERY_N_TICK = 10  # Inference every 1 second
+EMIT_EVERY_N_TICK = 1   # Emit dashboard mỗi N tick (1=10Hz, 2=5Hz, 5=2Hz). Tăng nếu mạng yếu.
 RING_BUFFER_SIZE = 60  # Keep 6 seconds of data at 10Hz (needed by range_estimator)
 
 CAN_PORT = "/dev/ttyUSB0"  # Waveshare USB-CAN port
@@ -379,42 +380,6 @@ def main_loop(
                         state.pack_voltage_v = _tcv          # nguồn voltage cho CNN kênh voltage
                         state.pack_power_w = _tcv * abs(state.pack_current_a)
 
-                # Emit SocketIO events ngoài lock (tránh giữ lock khi network)
-                if socketio is not None:
-                    socketio.emit("update_dash", {
-                        "speed": round(state.speed_kmh, 1),
-                        "soc": int(state.soc_bms),
-                        "soc_cc": round(state.soc_cc, 1),
-                        "soc_model": round(state.soc_model, 1),
-                        "temp": int(state.temp_c),
-                        "odo": round(state.odo_km, 1),
-                        "power": round(state.pack_power_w, 1),
-                        "range_km": round(state.range_km, 1),
-                        "range_bms": round(state.range_bms, 1),
-                        "range_cc": round(state.range_cc, 1),
-                        "range_model": round(state.range_model, 1),
-                        "soh": round(state.soh, 1),
-                        "is_kickstand": state.is_kickstand,
-                        "is_park":      state.is_park,
-                        "is_ready":     state.is_ready,
-                        "is_brake":     state.is_brake,
-                        "is_eco":       state.is_eco,
-                        "is_sport":     state.is_sport,
-                        "gps_lat":         state.gps_lat,
-                        "gps_lon":         state.gps_lon,
-                        "gps_speed_kmh":   round(state.gps_speed_kmh, 1),
-                        "gps_fix":         state.gps_fix,
-                        "gps_sats":        state.gps_sats,
-                        "gps_distance_km": round(state.gps_distance_km, 2),
-                    })
-                    if any(v > 0 for v in state.cell_data):
-                        socketio.emit("update_bms", {
-                            "voltage": round(sum(state.cell_data), 1),
-                            "current": round(state.pack_current_a, 2),
-                            "power": round(state.pack_power_w, 1),
-                            "cells": [round(c, 4) for c in state.cell_data],
-                        })
-
             # Một lần mỗi tick — sau khi drain hết frames:
             # chụp snapshot state vào buffer + cập nhật SoC #2 (CC)
             with lock:
@@ -426,6 +391,42 @@ def main_loop(
                     coulomb_counter.reset(state.soc_bms)
                     state.soc_cc = coulomb_counter.soc_cc
                     logger.info(f"Coulomb Counter reset to {state.soc_bms:.1f}%")
+
+            # Emit dashboard MỘT LẦN MỖI TICK (không theo từng frame) — tránh bão tin nhắn khi chạy
+            if socketio is not None and tick % EMIT_EVERY_N_TICK == 0:
+                socketio.emit("update_dash", {
+                    "speed": round(state.speed_kmh, 1),
+                    "soc": int(state.soc_bms),
+                    "soc_cc": round(state.soc_cc, 1),
+                    "soc_model": round(state.soc_model, 1),
+                    "temp": int(state.temp_c),
+                    "odo": round(state.odo_km, 1),
+                    "power": round(state.pack_power_w, 1),
+                    "range_km": round(state.range_km, 1),
+                    "range_bms": round(state.range_bms, 1),
+                    "range_cc": round(state.range_cc, 1),
+                    "range_model": round(state.range_model, 1),
+                    "soh": round(state.soh, 1),
+                    "is_kickstand": state.is_kickstand,
+                    "is_park":      state.is_park,
+                    "is_ready":     state.is_ready,
+                    "is_brake":     state.is_brake,
+                    "is_eco":       state.is_eco,
+                    "is_sport":     state.is_sport,
+                    "gps_lat":         state.gps_lat,
+                    "gps_lon":         state.gps_lon,
+                    "gps_speed_kmh":   round(state.gps_speed_kmh, 1),
+                    "gps_fix":         state.gps_fix,
+                    "gps_sats":        state.gps_sats,
+                    "gps_distance_km": round(state.gps_distance_km, 2),
+                })
+                if any(v > 0 for v in state.cell_data):
+                    socketio.emit("update_bms", {
+                        "voltage": round(sum(state.cell_data), 1),
+                        "current": round(state.pack_current_a, 2),
+                        "power": round(state.pack_power_w, 1),
+                        "cells": [round(c, 4) for c in state.cell_data],
+                    })
 
         except Exception as e:
             logger.warning(f"CAN read error: {e}, attempting reconnect...")
