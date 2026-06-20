@@ -57,7 +57,7 @@ WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 5000
 
 PERF_DEBUG = os.environ.get("PERF_DEBUG") == "1"  # Đo hiệu năng main_loop, mặc định tắt
-
+DISABLE_GPS = os.environ.get("DISABLE_GPS") == "1"  # 1 = không mở GPS serial, không start GPS thread
 
 # ============================================================================
 # SharedState — Dữ liệu chia sẻ giữa main loop và web server
@@ -280,8 +280,14 @@ def init_system() -> Tuple[object, CoulombCounter, SocInference, SohEstimator, D
 
     # GPS Reader (VK-162) — không chặn nếu GPS không cắm, xem reader.py
     gps_reader = GpsReader()
-    gps_reader.start()
-    logger.info("✓ GPS Reader started")
+    if DISABLE_GPS:
+        logger.warning(
+            "GPS disabled by DISABLE_GPS=1; GPS serial will NOT be opened, GPS thread will NOT start. "
+        "   GPS fields will stay at defaults."
+        )
+    else:
+        gps_reader.start()
+    logger.info("✓ GPS Reader started on %s", gps_reader.port)
 
     logger.info("System initialization complete ✓")
     return can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, runtime_logger, gps_reader, raw_writer
