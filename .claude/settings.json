@@ -35,7 +35,21 @@
       "Bash(awk -F'Range: BMS=' '{print $2}')",
       "Bash(awk '{print $1, $3, $5}')",
       "Bash(MOCK_CAN=1 timeout 75 python -m src.main)",
-      "Bash(node --check /tmp/inline.js)"
+      "Bash(node --check /tmp/inline.js)",
+      "Bash(python -m py_compile src/main.py)",
+      "Bash(MOCK_CAN=1 timeout 12 python -m src.main)",
+      "Bash(MOCK_CAN=1 PERF_DEBUG=1 timeout 5 python -m src.main)",
+      "Bash(MOCK_CAN=1 timeout 5 python -m src.main)",
+      "Bash(echo \"grep_exit=$?\")",
+      "Bash(python -m py_compile src/main.py src/can_reader/rx_thread.py src/can_reader/raw_writer.py)",
+      "Bash(python -m pytest tests/test_raw_pipeline_stress.py -v)",
+      "Bash(export MOCK_CAN=1)",
+      "Bash(timeout 6 python -m src.main)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/ --ignore=tests/test_integration.py -v)",
+      "Bash(git stash *)",
+      "Bash(python -m pytest tests/test_display.py tests/test_logger.py -q)",
+      "Bash(python -m py_compile src/main.py src/gps/reader.py)"
     ]
   }
 }

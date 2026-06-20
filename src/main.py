@@ -29,7 +29,7 @@ from src.can_reader.decoder import decode as decode_can
 from src.can_reader.rx_thread import CanRxThread
 from src.can_reader.raw_writer import RawCanWriter
 from src.coulomb_counter.counter import CoulombCounter
-from src.gps.reader import GpsReader
+from src.gps.reader import GpsReader, GPS_SERIAL_TIMEOUT_S
 from src.logger.writer import RuntimeLogger
 from src.preprocessing.normalize import apply_minmax
 from src.range_estimator.estimator import RangeEstimator
@@ -58,6 +58,10 @@ WEB_SERVER_PORT = 5000
 
 PERF_DEBUG = os.environ.get("PERF_DEBUG") == "1"  # Đo hiệu năng main_loop, mặc định tắt
 DISABLE_GPS = os.environ.get("DISABLE_GPS") == "1"  # 1 = không mở GPS serial, không start GPS thread
+# 1 = GPS thread vẫn đọc/parse NMEA bình thường, nhưng main loop KHÔNG ghi gps_*
+# vào SharedState/emit, và GpsReader không tích lũy distance_km. Dùng để cô lập
+# bug freeze: pass → bug ở distance/state/emit; fail → bug ở reader/thread/serial/parser.
+GPS_READ_ONLY = os.environ.get("GPS_READ_ONLY") == "1"
 
 # ============================================================================
 # SharedState — Dữ liệu chia sẻ giữa main loop và web server
@@ -280,6 +284,10 @@ def init_system() -> Tuple[object, CoulombCounter, SocInference, SohEstimator, D
 
     # GPS Reader (VK-162) — không chặn nếu GPS không cắm, xem reader.py
     gps_reader = GpsReader()
+    logger.info(
+        "GPS startup: DISABLE_GPS=%s GPS_READ_ONLY=%s GPS_PORT=%s CAN_PORT=%s serial_timeout_s=%s",
+        DISABLE_GPS, GPS_READ_ONLY, gps_reader.port, CAN_PORT, GPS_SERIAL_TIMEOUT_S,
+    )
     if DISABLE_GPS:
         logger.warning(
             "GPS disabled by DISABLE_GPS=1; GPS serial will NOT be opened, GPS thread will NOT start. "
@@ -287,6 +295,10 @@ def init_system() -> Tuple[object, CoulombCounter, SocInference, SohEstimator, D
         )
     else:
         gps_reader.start()
+    logger.info(
+        "GPS serial opened: %s | GPS thread started: %s",
+        gps_reader._available, gps_reader._thread is not None and gps_reader._thread.is_alive(),
+    )
     logger.info("✓ GPS Reader started on %s", gps_reader.port)
 
     logger.info("System initialization complete ✓")
@@ -355,6 +367,11 @@ def main_loop(
     _health_last = time.monotonic()
     _health_last_rx_count = getattr(can_reader, "rx_count", 0)
     _health_last_written = getattr(raw_writer, "written_count", 0) if raw_writer else 0
+
+    # Metric chẩn đoán GPS/lock contention (chỉ in khi PERF_DEBUG=1, xem [GPS-HEALTH])
+    _state_lock_wait_ms_max = 0.0
+    _state_lock_hold_ms_max = 0.0
+    _gps_get_latest_ms_max = 0.0
 
     while True:
         t0 = time.monotonic()
@@ -557,10 +574,17 @@ def main_loop(
                 )
 
                 # GPS snapshot — đồng bộ theo state.timestamp (mốc chung của row 1Hz)
+                # (cho phép gọi get_latest() để đo dù GPS_READ_ONLY=1 — chỉ không ghi vào state)
+                _gps_t0 = time.monotonic()
                 gps_snapshot = gps_reader.get_latest()
+                _gps_get_latest_ms_max = max(_gps_get_latest_ms_max, (time.monotonic() - _gps_t0) * 1000.0)
 
                 # Write results + tính sai số & MAE (locked, fast)
+                _lock_wait_t0 = time.monotonic()
                 with lock:
+                    _lock_acquired_t = time.monotonic()
+                    _state_lock_wait_ms_max = max(_state_lock_wait_ms_max, (_lock_acquired_t - _lock_wait_t0) * 1000.0)
+
                     state.soc_model = soc_model
                     state.soh = soh
                     state.range_model = range_model
@@ -569,12 +593,13 @@ def main_loop(
                     state.range_km    = range_model   # alias giữ tương thích display/logger cũ
                     state.wh_per_km   = wh_per_km
 
-                    state.gps_lat = gps_snapshot["lat"]
-                    state.gps_lon = gps_snapshot["lon"]
-                    state.gps_speed_kmh = gps_snapshot["speed_kmh"]
-                    state.gps_fix = gps_snapshot["fix"]
-                    state.gps_sats = gps_snapshot["sats"]
-                    state.gps_distance_km = gps_snapshot["distance_km"]
+                    if not GPS_READ_ONLY:
+                        state.gps_lat = gps_snapshot["lat"]
+                        state.gps_lon = gps_snapshot["lon"]
+                        state.gps_speed_kmh = gps_snapshot["speed_kmh"]
+                        state.gps_fix = gps_snapshot["fix"]
+                        state.gps_sats = gps_snapshot["sats"]
+                        state.gps_distance_km = gps_snapshot["distance_km"]
 
                     # Sai số tức thời so với BMS (ground truth)
                     err_model = soc_model - state.soc_bms
@@ -596,6 +621,8 @@ def main_loop(
                     state.mae_model = mae_model
                     state.mae_cc    = mae_cc
                     state.mae_warm  = mae_warm
+
+                    _state_lock_hold_ms_max = max(_state_lock_hold_ms_max, (time.monotonic() - _lock_acquired_t) * 1000.0)
 
                 # Log to CSV (outside lock)
                 runtime_logger.write(state)
@@ -681,6 +708,27 @@ def main_loop(
             _health_last = _health_now
             _health_last_rx_count = rx_count if rx_count is not None else 0
             _health_last_written = written_count if written_count is not None else 0
+
+            # [GPS-HEALTH] — chẩn đoán riêng GPS + lock contention, chỉ in khi PERF_DEBUG=1
+            if PERF_DEBUG:
+                _gm = gps_reader.get_metrics()
+                logger.info(
+                    "[GPS-HEALTH] gps_enabled=%s gps_read_only=%s gps_thread_alive=%s gps_available=%s "
+                    "gps_iters_per_sec=%.1f gps_sentences_per_sec=%.1f gps_parse_errors_per_sec=%.1f "
+                    "gps_last_sentence_age_ms=%s gps_last_fix_age_ms=%s gps_lock_hold_ms_max=%.2f "
+                    "gps_reconnect_count=%s state_lock_wait_ms_max=%.2f state_lock_hold_ms_max=%.2f "
+                    "gps_get_latest_ms_max=%.2f",
+                    _gm["gps_enabled"], _gm["gps_read_only"], _gm["gps_thread_alive"], _gm["gps_available"],
+                    _gm["gps_iters_per_sec"], _gm["gps_sentences_per_sec"], _gm["gps_parse_errors_per_sec"],
+                    f"{_gm['gps_last_sentence_age_ms']:.0f}" if _gm["gps_last_sentence_age_ms"] is not None else "n/a",
+                    f"{_gm['gps_last_fix_age_ms']:.0f}" if _gm["gps_last_fix_age_ms"] is not None else "n/a",
+                    _gm["gps_lock_hold_ms_max"],
+                    _gm["gps_reconnect_count"], _state_lock_wait_ms_max, _state_lock_hold_ms_max,
+                    _gps_get_latest_ms_max,
+                )
+                _state_lock_wait_ms_max = 0.0
+                _state_lock_hold_ms_max = 0.0
+                _gps_get_latest_ms_max = 0.0
 
         # Keep 10Hz timing
         sleep_time = max(0, TICK_DT - elapsed)
