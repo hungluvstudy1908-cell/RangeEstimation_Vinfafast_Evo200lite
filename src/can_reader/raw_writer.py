@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 WRITER_FLUSH_INTERVAL_S = 1.0
 WRITER_FSYNC_INTERVAL_S = 20.0
 _QUEUE_GET_TIMEOUT_S = 0.5
+WRITER_IDLE_WARN_MS = 2000.0       # không record mới liên tục >2s khi thread vẫn alive
+WRITER_IDLE_WARN_THROTTLE_S = 2.0  # throttle log WARNING khi idle kéo dài
 
 DEFAULT_RAW_DIR = Path(__file__).parent.parent.parent / "data" / "raw_can"
 
@@ -57,6 +59,9 @@ class RawCanWriter:
         # Metrics
         self.written_count = 0
         self.last_flush_mono = None
+        self.last_write_mono = None      # cập nhật mỗi lần ghi 1 dòng ra file
+        self._last_record_mono = time.monotonic()  # tuổi "no input" — phân biệt writer-chết vs không-input
+        self._last_idle_warn_mono = 0.0
 
         logger.info("RawCanWriter: ghi raw CAN ra %s", self.filepath)
 
@@ -64,6 +69,13 @@ class RawCanWriter:
     def alive(self) -> bool:
         """True nếu thread writer đang chạy."""
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def last_raw_write_age_ms(self):
+        """Tuổi (ms) của lần ghi dòng CSV gần nhất, None nếu chưa ghi dòng nào."""
+        if self.last_write_mono is None:
+            return None
+        return (time.monotonic() - self.last_write_mono) * 1000.0
 
     def start(self) -> None:
         """Start daemon thread chạy _run()."""
@@ -81,8 +93,10 @@ class RawCanWriter:
             except queue.Empty:
                 if self._stop_event.is_set():
                     break
+                self._warn_if_idle()
                 continue
 
+            self._last_record_mono = time.monotonic()
             self._write_record(record)
 
             now = time.monotonic()
@@ -114,6 +128,15 @@ class RawCanWriter:
         t_wall, t_mono, can_id, dlc, data = record
         self._file.write(f"{t_wall:.6f},{t_mono},{can_id},{dlc},{data.hex()}\n")
         self.written_count += 1
+        self.last_write_mono = time.monotonic()
+
+    def _warn_if_idle(self) -> None:
+        """Log WARNING throttled khi queue rỗng liên tục >WRITER_IDLE_WARN_MS — phân biệt writer-chết vs không-input."""
+        now = time.monotonic()
+        idle_ms = (now - self._last_record_mono) * 1000.0
+        if idle_ms > WRITER_IDLE_WARN_MS and now - self._last_idle_warn_mono >= WRITER_IDLE_WARN_THROTTLE_S:
+            logger.warning("RawCanWriter: raw queue idle %.0fms (writer alive, no input)", idle_ms)
+            self._last_idle_warn_mono = now
 
     def stop(self) -> None:
         """Báo dừng — thread sẽ tự drain nốt queue + flush + fsync + close trước khi thoát."""

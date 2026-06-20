@@ -28,6 +28,13 @@ RAW_QUEUE_HARD_LIMIT = 20000  # qsize vượt → log CRITICAL, KHÔNG crash
 _RECONNECT_RETRY_DELAY_S = 1.0
 _IDLE_SLEEP_S = 0.001  # tránh busy-wait 100% CPU khi không có frame mới
 
+# Waveshare có thể "latch im lặng" (read_frames() trả rỗng, in_waiting=0,
+# KHÔNG raise) khi USB bus bị giành bởi thiết bị khác (vd GPS serial) — đường
+# except cũ không bắt được trường hợp này. CAN_STALE_MS/COOLDOWN: phát hiện
+# CHỦ ĐỘNG theo tuổi frame gần nhất rồi tự reopen serial.
+CAN_STALE_MS = 2000
+CAN_RECONNECT_COOLDOWN_MS = 3000
+
 
 class CanRxThread:
     """
@@ -66,6 +73,12 @@ class CanRxThread:
 
         self._last_soft_warn_mono = 0.0
         self._last_hard_warn_mono = 0.0
+
+        # Metrics — proactive stale-detect + reopen (xem CAN_STALE_MS)
+        self.can_reconnect_count = 0
+        self.can_serial_errors = 0
+        self.can_stale = False
+        self._last_reconnect_mono = None
 
     @property
     def alive(self) -> bool:
@@ -108,6 +121,7 @@ class CanRxThread:
                     self.last_frame_t_mono = t_mono
 
                 self._check_queue_watermark()
+                self._check_stale_and_maybe_reopen()
 
                 if not frames:
                     time.sleep(_IDLE_SLEEP_S)
@@ -116,6 +130,46 @@ class CanRxThread:
                 self.rx_errors += 1
                 logger.warning("CanRxThread: lỗi đọc serial (%s), thử reconnect...", e)
                 self._reconnect_loop()
+
+    def _check_stale_and_maybe_reopen(self) -> None:
+        """
+        Phát hiện stale CHỦ ĐỘNG theo tuổi frame gần nhất — bù cho việc latch
+        im lặng của Waveshare không raise exception nên except ở _run() không
+        bắt được. Reopen 1 lần/cooldown, KHÔNG block vô hạn (Waveshare có thể
+        thật sự đang rút cáp) — nếu vẫn stale, lần check sau (cooldown kế tiếp)
+        sẽ tự thử lại.
+        """
+        if self.last_frame_t_mono is None:
+            return
+
+        now = time.monotonic_ns()
+        age_ms = (now - self.last_frame_t_mono) / 1e6
+        self.can_stale = age_ms > CAN_STALE_MS
+        if not self.can_stale:
+            return
+
+        cooled = (
+            self._last_reconnect_mono is None
+            or (now - self._last_reconnect_mono) / 1e6 > CAN_RECONNECT_COOLDOWN_MS
+        )
+        if not cooled:
+            return
+
+        try:
+            logger.warning(
+                "CanRxThread: CAN stale %.0fms → reopen serial (reconnect #%d)",
+                age_ms, self.can_reconnect_count + 1,
+            )
+            self._inner.disconnect()
+            self._inner.connect()
+            self.can_reconnect_count += 1
+            self._last_reconnect_mono = time.monotonic_ns()
+            self.last_frame_t_mono = self._last_reconnect_mono  # reset đồng hồ stale
+            self.can_stale = False
+        except Exception as e:
+            self.can_serial_errors += 1
+            logger.error("CanRxThread: reopen failed: %s", e)
+            time.sleep(0.5)
 
     def _check_queue_watermark(self) -> None:
         """Cảnh báo nếu raw_queue phình to bất thường — throttle log ~1Hz."""
@@ -171,6 +225,11 @@ class CanRxThread:
         if self.last_frame_t_mono is None:
             return None
         return (time.monotonic_ns() - self.last_frame_t_mono) / 1e6
+
+    @property
+    def can_last_frame_age_ms(self):
+        """Alias dạng property của last_frame_age_ms() — dùng cho health log + SharedState."""
+        return self.last_frame_age_ms()
 
     def stop(self) -> None:
         """Dừng thread RX (không đóng serial — gọi disconnect() để đóng luôn)."""

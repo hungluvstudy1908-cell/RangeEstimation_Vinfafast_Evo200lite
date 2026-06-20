@@ -122,6 +122,10 @@ class SharedState:
     gps_sats: int = 0
     gps_distance_km: float = 0.0
 
+    # CAN stale-detect (updated mỗi tick từ CanRxThread — False/None với MockCanReader)
+    can_stale: bool = False
+    can_last_frame_age_ms: Optional[float] = None
+
 
     # Sai số tức thời & MAE trượt so với BMS (tính 1Hz)
     err_model: float = 0.0   # soc_model - soc_bms (có dấu)
@@ -198,6 +202,8 @@ class SharedState:
             "gps_fix": self.gps_fix,
             "gps_sats": self.gps_sats,
             "gps_distance_km": self.gps_distance_km,
+            "can_stale": self.can_stale,
+            "can_last_frame_age_ms": self.can_last_frame_age_ms,
             "pack_power_w": self.pack_power_w,
             "cell_data": list(self.cell_data),
             "is_kickstand": self.is_kickstand,
@@ -382,6 +388,11 @@ def main_loop(
             if PERF_DEBUG:
                 _perf_frames_max = max(_perf_frames_max, len(frames))
 
+            # Cập nhật cờ stale-detect cho dashboard (no-op/False với MockCanReader)
+            with lock:
+                state.can_stale = getattr(can_reader, "can_stale", False)
+                state.can_last_frame_age_ms = getattr(can_reader, "can_last_frame_age_ms", None)
+
             for frame in frames:
                 # Mock mode trả về decoded dict trực tiếp; hardware trả về (can_id, bytes)
                 if isinstance(frame, dict):
@@ -476,6 +487,7 @@ def main_loop(
                     "gps_fix":         state.gps_fix,
                     "gps_sats":        state.gps_sats,
                     "gps_distance_km": round(state.gps_distance_km, 2),
+                    "can_stale":       state.can_stale,
                 })
                 if any(v > 0 for v in state.cell_data):
                     socketio.emit("update_bms", {
@@ -688,11 +700,14 @@ def main_loop(
             raw_writer_fps = (written_count - _health_last_written) / _health_dt if written_count is not None else None
             raw_queue_len = raw_writer._raw_queue.qsize() if raw_writer else None
 
+            last_raw_write_age_ms = getattr(raw_writer, "last_raw_write_age_ms", None) if raw_writer else None
+
             logger.info(
                 "[HEALTH] can_rx_fps=%s raw_writer_fps=%s processor_fps=%.1f "
                 "raw_queue_len=%s max_raw_queue_len=%s raw_dropped=0 proc_dropped=%s "
                 "can_thread_alive=%s writer_thread_alive=%s can_last_frame_age_ms=%s "
-                "gps_thread_alive=%s",
+                "gps_thread_alive=%s can_reconnect_count=%s can_serial_errors=%s "
+                "can_stale=%s last_raw_write_age_ms=%s",
                 f"{can_rx_fps:.1f}" if can_rx_fps is not None else "n/a",
                 f"{raw_writer_fps:.1f}" if raw_writer_fps is not None else "n/a",
                 state.fps_actual,
@@ -703,6 +718,10 @@ def main_loop(
                 getattr(raw_writer, "alive", "n/a") if raw_writer else "n/a",
                 f"{can_reader.last_frame_age_ms():.0f}" if hasattr(can_reader, "last_frame_age_ms") and can_reader.last_frame_age_ms() is not None else "n/a",
                 gps_reader._thread is not None and gps_reader._thread.is_alive(),
+                getattr(can_reader, "can_reconnect_count", "n/a"),
+                getattr(can_reader, "can_serial_errors", "n/a"),
+                getattr(can_reader, "can_stale", "n/a"),
+                f"{last_raw_write_age_ms:.0f}" if last_raw_write_age_ms is not None else "n/a",
             )
 
             _health_last = _health_now
@@ -712,19 +731,20 @@ def main_loop(
             # [GPS-HEALTH] — chẩn đoán riêng GPS + lock contention, chỉ in khi PERF_DEBUG=1
             if PERF_DEBUG:
                 _gm = gps_reader.get_metrics()
+                _gl = gps_reader.get_latest()
                 logger.info(
                     "[GPS-HEALTH] gps_enabled=%s gps_read_only=%s gps_thread_alive=%s gps_available=%s "
                     "gps_iters_per_sec=%.1f gps_sentences_per_sec=%.1f gps_parse_errors_per_sec=%.1f "
                     "gps_last_sentence_age_ms=%s gps_last_fix_age_ms=%s gps_lock_hold_ms_max=%.2f "
                     "gps_reconnect_count=%s state_lock_wait_ms_max=%.2f state_lock_hold_ms_max=%.2f "
-                    "gps_get_latest_ms_max=%.2f",
+                    "gps_get_latest_ms_max=%.2f gps_fix=%s gps_sats=%s",
                     _gm["gps_enabled"], _gm["gps_read_only"], _gm["gps_thread_alive"], _gm["gps_available"],
                     _gm["gps_iters_per_sec"], _gm["gps_sentences_per_sec"], _gm["gps_parse_errors_per_sec"],
                     f"{_gm['gps_last_sentence_age_ms']:.0f}" if _gm["gps_last_sentence_age_ms"] is not None else "n/a",
                     f"{_gm['gps_last_fix_age_ms']:.0f}" if _gm["gps_last_fix_age_ms"] is not None else "n/a",
                     _gm["gps_lock_hold_ms_max"],
                     _gm["gps_reconnect_count"], _state_lock_wait_ms_max, _state_lock_hold_ms_max,
-                    _gps_get_latest_ms_max,
+                    _gps_get_latest_ms_max, _gl["fix"], _gl["sats"],
                 )
                 _state_lock_wait_ms_max = 0.0
                 _state_lock_hold_ms_max = 0.0

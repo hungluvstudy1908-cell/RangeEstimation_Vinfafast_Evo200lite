@@ -19,6 +19,13 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
     text-align:center;background:#7f1d1d;color:#fca5a5;
     padding:5px 12px;font-size:12px;letter-spacing:.04em;
 }
+#can-stale-banner{
+    display:none;position:sticky;top:0;z-index:10;
+    text-align:center;background:#78350f;color:#fde68a;
+    padding:5px 12px;font-size:12px;letter-spacing:.04em;
+}
+/* Mờ các số phụ thuộc CAN khi can_stale=true — KHÔNG hiển thị như live */
+.can-stale .can-dependent{opacity:.35;}
 
 /* ── Cluster: nền radial gradient, đổi màu khi đổi mode ── */
 .cluster{
@@ -139,6 +146,7 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
 <body>
 
 <div id="offline-banner">⚠ Mất kết nối — đang chờ dữ liệu CAN...</div>
+<div id="can-stale-banner">⚠ CAN STALE — số liệu dưới không phải live</div>
 
 <div class="cluster comfort" id="cluster">
 
@@ -158,7 +166,7 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
   <div class="row">
 
     <!-- Cột trái: 3 nguồn SoC canh trái, cùng mép -->
-    <div class="side">
+    <div class="side can-dependent">
       <div class="lbl">#1 BMS SoC</div>
       <div class="v1"><span id="pp-bms">--</span><span style="font-size:17px">%</span></div>
       <div class="v2" style="color:#FBBF24;margin-top:12px">
@@ -170,7 +178,7 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
     </div>
 
     <!-- Cột giữa: speed ring (SVG + overlay số) -->
-    <div class="ringwrap big">
+    <div class="ringwrap big can-dependent">
       <!-- viewBox 230×230, r=105, C=2π×105≈659.73 -->
       <svg viewBox="0 0 230 230" aria-hidden="true">
         <circle class="fc" cx="115" cy="115" r="105"/>
@@ -186,6 +194,7 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
 
     <!-- Cột phải: range lớn + hàng 3 metric (nhiệt độ / SoH / odo) -->
     <div class="side r">
+      <div class="can-dependent">
       <div class="lbl">range còn lại</div>
       <div class="v1"><span id="p-range-bms">--</span><span style="font-size:15px"> km</span></div>
       <div class="v2" style="color:#FBBF24;margin-top:12px">
@@ -208,6 +217,7 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
           <div class="metric-val"><span id="p-odo">--</span><span class="metric-unit">km</span></div>
         </div>
       </div>
+      </div><!-- /can-dependent -->
       <div class="metrics-row">
         <div class="metric-card">
           <div class="lbl">GPS Odo</div>
@@ -223,7 +233,7 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
 
   <!-- ── Power row: ring nhỏ + mode chip ── -->
 <div class="powerrow">
-    <div class="ringwrap sm">
+    <div class="ringwrap sm can-dependent">
       <svg viewBox="0 0 150 150" aria-hidden="true">
         <circle class="fc" cx="75" cy="75" r="66"/>
         <circle class="fc" cx="75" cy="75" r="55"/>
@@ -347,6 +357,10 @@ socket.on('update_dash', function(d){
 
     // Theme tự động theo cờ CAN
     applyMode(d.is_sport ? 'sport' : (d.is_eco ? 'eco' : 'comfort'));
+
+    // CAN stale: hiện banner + mờ các số phụ thuộc CAN (xem CHẨN ĐOÁN ĐƯỜNG CAN ingestion)
+    cluster.classList.toggle('can-stale', !!d.can_stale);
+    document.getElementById('can-stale-banner').style.display = d.can_stale ? 'block' : 'none';
 });
 </script>
 </body>

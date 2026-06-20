@@ -25,13 +25,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUDRATE = 9600
 GPS_SERIAL_TIMEOUT_S = 1.0  # timeout đọc serial — tách hằng số để log startup thấy giá trị thật
+GPS_READ_SLEEP_S = 0.05     # sleep khi readline() rỗng — GPS 1Hz nên dư, tránh poll dồn USB bus
 _KNOT_TO_KMH = 1.852
 _EARTH_RADIUS_KM = 6371.0
 _MIN_STEP_KM = 0.002  # lọc nhiễu đứng yên — bỏ bước < 2m
 
-# GPS_READ_ONLY=1: thread GPS vẫn đọc/parse NMEA bình thường, NHƯNG không
-# tích lũy distance_km (haversine). Dùng để cô lập bug: pass → bug ở
-# distance/state/emit phía main; fail → bug ở reader/thread/serial/parser/lock.
+# GPS_READ_ONLY=1: thread vẫn readline() để giữ port sống/drain bus, NHƯNG bỏ
+# qua parse NMEA và bỏ cập nhật shared state/distance hoàn toàn. Mục đích: cô
+# lập "đọc serial GPS thuần USB I/O" khỏi "xử lý GPS (Python/GIL/lock)" khi so
+# sánh ảnh hưởng lên CAN RX — pass (không stall CAN) → việc xử lý NMEA/lock
+# phía Python góp phần gây tranh chấp; fail (vẫn stall) → bản thân I/O serial
+# GPS trên USB bus là nguyên nhân chính.
 GPS_READ_ONLY = os.environ.get("GPS_READ_ONLY") == "1"
 
 
@@ -133,7 +137,14 @@ class GpsReader:
         while self._running:
             self._iter_count += 1
             try:
-                line = self._ser.readline().decode("ascii", errors="ignore").strip()
+                raw_line = self._ser.readline()
+                if not raw_line:
+                    time.sleep(GPS_READ_SLEEP_S)
+                    continue
+                if GPS_READ_ONLY:
+                    # Drain bus, giữ port sống — KHÔNG parse, KHÔNG update state.
+                    continue
+                line = raw_line.decode("ascii", errors="ignore").strip()
                 if not line:
                     continue
                 msg = pynmea2.parse(line)
