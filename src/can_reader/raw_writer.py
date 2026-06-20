@@ -77,6 +77,11 @@ class RawCanWriter:
             return None
         return (time.monotonic() - self.last_write_mono) * 1000.0
 
+    @property
+    def raw_writes_total(self):
+        """Alias của written_count — tên rõ nghĩa hơn cho health log, KHÔNG phải counter riêng."""
+        return self.written_count
+
     def start(self) -> None:
         """Start daemon thread chạy _run()."""
         self._thread = threading.Thread(target=self._run, daemon=True)

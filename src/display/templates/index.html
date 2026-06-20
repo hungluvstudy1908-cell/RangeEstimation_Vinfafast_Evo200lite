@@ -251,6 +251,8 @@ html,body{height:100%;background:#000;overflow-x:hidden;}
 // ── Constants (1 chỗ — chỉnh khi biết đúng thông số Evo 200 Lite) ──
 var MAX_SPEED = 60;    // TODO: tốc độ tối đa (km/h)
 var MAX_POWER = 1500;  // TODO: công suất tối đa (W)
+var CAN_STALE_BANNER_HOLD_MS = 3000;  // giữ banner sau lần cuối nhận can_stale=true
+var canStaleHoldTimer = null;
 
 // Chu vi vòng: C = 2π × r
 var Cs = 2 * Math.PI * 105;  // speed ring r=105
@@ -358,9 +360,18 @@ socket.on('update_dash', function(d){
     // Theme tự động theo cờ CAN
     applyMode(d.is_sport ? 'sport' : (d.is_eco ? 'eco' : 'comfort'));
 
-    // CAN stale: hiện banner + mờ các số phụ thuộc CAN (xem CHẨN ĐOÁN ĐƯỜNG CAN ingestion)
-    cluster.classList.toggle('can-stale', !!d.can_stale);
-    document.getElementById('can-stale-banner').style.display = d.can_stale ? 'block' : 'none';
+    // CAN stale: hiện banner + mờ các số phụ thuộc CAN. Giữ banner thêm
+    // CAN_STALE_BANNER_HOLD_MS sau lần cuối nhận can_stale=true qua socket —
+    // phòng khi nhịp emit (EMIT_EVERY_N_TICK) thưa hơn latch ở backend.
+    if (d.can_stale) {
+        cluster.classList.add('can-stale');
+        document.getElementById('can-stale-banner').style.display = 'block';
+        clearTimeout(canStaleHoldTimer);
+        canStaleHoldTimer = setTimeout(function(){
+            cluster.classList.remove('can-stale');
+            document.getElementById('can-stale-banner').style.display = 'none';
+        }, CAN_STALE_BANNER_HOLD_MS);
+    }
 });
 </script>
 </body>

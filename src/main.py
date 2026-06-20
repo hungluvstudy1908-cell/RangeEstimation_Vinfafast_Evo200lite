@@ -707,7 +707,8 @@ def main_loop(
                 "raw_queue_len=%s max_raw_queue_len=%s raw_dropped=0 proc_dropped=%s "
                 "can_thread_alive=%s writer_thread_alive=%s can_last_frame_age_ms=%s "
                 "gps_thread_alive=%s can_reconnect_count=%s can_serial_errors=%s "
-                "can_stale=%s last_raw_write_age_ms=%s",
+                "can_stale=%s last_raw_write_age_ms=%s can_stale_count=%s "
+                "can_recover_count=%s can_frames_total=%s raw_writes_total=%s",
                 f"{can_rx_fps:.1f}" if can_rx_fps is not None else "n/a",
                 f"{raw_writer_fps:.1f}" if raw_writer_fps is not None else "n/a",
                 state.fps_actual,
@@ -722,6 +723,10 @@ def main_loop(
                 getattr(can_reader, "can_serial_errors", "n/a"),
                 getattr(can_reader, "can_stale", "n/a"),
                 f"{last_raw_write_age_ms:.0f}" if last_raw_write_age_ms is not None else "n/a",
+                getattr(can_reader, "can_stale_count", "n/a"),
+                getattr(can_reader, "can_recover_count", "n/a"),
+                getattr(can_reader, "can_frames_total", "n/a"),
+                getattr(raw_writer, "raw_writes_total", "n/a") if raw_writer else "n/a",
             )
 
             _health_last = _health_now

@@ -52,7 +52,9 @@
       "Bash(python -m py_compile src/main.py src/gps/reader.py)",
       "Bash(python -m py_compile src/main.py src/gps/reader.py src/can_reader/rx_thread.py src/can_reader/raw_writer.py src/can_reader/reader.py)",
       "Bash(timeout 12 env MOCK_CAN=1 PERF_DEBUG=1 python -u -m src.main)",
-      "Bash(timeout 8 env MOCK_CAN=1 GPS_READ_ONLY=1 PERF_DEBUG=1 python -u -m src.main)"
+      "Bash(timeout 8 env MOCK_CAN=1 GPS_READ_ONLY=1 PERF_DEBUG=1 python -u -m src.main)",
+      "Bash(timeout 8 env MOCK_CAN=1 PERF_DEBUG=1 python -u -m src.main)",
+      "Bash(python3 -)"
     ]
   }
 }

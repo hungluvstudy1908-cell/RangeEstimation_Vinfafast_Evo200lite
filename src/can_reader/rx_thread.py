@@ -34,6 +34,10 @@ _IDLE_SLEEP_S = 0.001  # tránh busy-wait 100% CPU khi không có frame mới
 # CHỦ ĐỘNG theo tuổi frame gần nhất rồi tự reopen serial.
 CAN_STALE_MS = 2000
 CAN_RECONNECT_COOLDOWN_MS = 3000
+# can_stale tự reset về False ngay trong cùng vòng lặp khi reopen xong (vài ms) —
+# health log 1Hz (thread khác, lệch nhịp) gần như không bao giờ bắt được cửa sổ đó.
+# Latch giữ can_stale=True tối thiểu CAN_STALE_LATCH_MS sau lần stale/reconnect cuối.
+CAN_STALE_LATCH_MS = 2500
 
 
 class CanRxThread:
@@ -80,6 +84,12 @@ class CanRxThread:
         self.can_stale = False
         self._last_reconnect_mono = None
 
+        # Metrics — observability quanh latch can_stale (xem CAN_STALE_LATCH_MS)
+        self.can_stale_count = 0     # số episode stale (đếm theo transition False→True)
+        self.can_recover_count = 0   # số episode đã recover (1-1 với can_stale_count, không double-count)
+        self._stale_latch_until_mono = None
+        self._stale_episode_recovered = True  # chưa có episode đang mở
+
     @property
     def alive(self) -> bool:
         """True nếu thread RX đang chạy."""
@@ -104,6 +114,8 @@ class CanRxThread:
         """Vòng lặp drain serial liên tục — chạy trong thread riêng."""
         while not self._stop_event.is_set():
             try:
+                was_stale = self.can_stale  # để phát hiện "frame đầu tiên sau giai đoạn stale"
+
                 frames = self._inner.read_frames()
                 t_mono = time.monotonic_ns()
                 t_wall = time.time()
@@ -119,17 +131,56 @@ class CanRxThread:
 
                 if frames:
                     self.last_frame_t_mono = t_mono
+                    if was_stale:
+                        self._mark_recovered()
 
                 self._check_queue_watermark()
                 self._check_stale_and_maybe_reopen()
+                self._expire_stale_latch()
 
                 if not frames:
                     time.sleep(_IDLE_SLEEP_S)
 
             except Exception as e:
                 self.rx_errors += 1
+                _age_ms = self.last_frame_age_ms()
+                self._mark_stale("serial_exception", _age_ms if _age_ms is not None else 0.0)
                 logger.warning("CanRxThread: lỗi đọc serial (%s), thử reconnect...", e)
                 self._reconnect_loop()
+
+    def _mark_stale(self, reason: str, age_ms: float) -> None:
+        """
+        Đánh dấu can_stale=True và giữ latch tối thiểu CAN_STALE_LATCH_MS — chỉ
+        log/đếm can_stale_count 1 lần mỗi episode (transition False→True), gọi
+        lại nhiều lần trong lúc đang stale không tăng counter thêm.
+        """
+        now = time.monotonic_ns()
+        if not self.can_stale:
+            self.can_stale_count += 1
+            self._stale_episode_recovered = False
+            logger.warning("CAN_STALE_DETECTED reason=%s age_ms=%.0f", reason, age_ms)
+        self.can_stale = True
+        self._stale_latch_until_mono = now + CAN_STALE_LATCH_MS * 1_000_000
+
+    def _mark_recovered(self) -> None:
+        """
+        Gọi khi reconnect thành công HOẶC khi frame mới tới sau giai đoạn stale.
+        Có thể được gọi từ cả 2 nơi cho cùng 1 episode — chỉ đếm/log lần đầu
+        (self._stale_episode_recovered chặn double-count). can_stale KHÔNG bị
+        tắt ở đây — latch trong _expire_stale_latch() lo việc đó.
+        """
+        if self.can_stale and not self._stale_episode_recovered:
+            self.can_recover_count += 1
+            self._stale_episode_recovered = True
+            logger.info("CAN_RECOVERED reconnect_count=%d", self.can_reconnect_count)
+
+    def _expire_stale_latch(self) -> None:
+        """Tắt can_stale sau khi đã giữ True đủ CAN_STALE_LATCH_MS kể từ lần stale/reconnect cuối."""
+        if not self.can_stale or self._stale_latch_until_mono is None:
+            return
+        if time.monotonic_ns() >= self._stale_latch_until_mono:
+            self.can_stale = False
+            self._stale_latch_until_mono = None
 
     def _check_stale_and_maybe_reopen(self) -> None:
         """
@@ -144,9 +195,10 @@ class CanRxThread:
 
         now = time.monotonic_ns()
         age_ms = (now - self.last_frame_t_mono) / 1e6
-        self.can_stale = age_ms > CAN_STALE_MS
-        if not self.can_stale:
+        if age_ms <= CAN_STALE_MS:
             return
+
+        self._mark_stale("age_timeout", age_ms)
 
         cooled = (
             self._last_reconnect_mono is None
@@ -156,16 +208,17 @@ class CanRxThread:
             return
 
         try:
-            logger.warning(
-                "CanRxThread: CAN stale %.0fms → reopen serial (reconnect #%d)",
-                age_ms, self.can_reconnect_count + 1,
+            logger.info(
+                "CAN_RECONNECT_ATTEMPT attempt=%d reason=age_timeout age_ms=%.0f",
+                self.can_reconnect_count + 1, age_ms,
             )
             self._inner.disconnect()
             self._inner.connect()
             self.can_reconnect_count += 1
             self._last_reconnect_mono = time.monotonic_ns()
             self.last_frame_t_mono = self._last_reconnect_mono  # reset đồng hồ stale
-            self.can_stale = False
+            logger.info("CAN_RECONNECT_SUCCESS reconnect_count=%d", self.can_reconnect_count)
+            self._mark_recovered()
         except Exception as e:
             self.can_serial_errors += 1
             logger.error("CanRxThread: reopen failed: %s", e)
@@ -194,12 +247,17 @@ class CanRxThread:
         except Exception:
             pass
 
+        logger.info("CAN_RECONNECT_ATTEMPT attempt=%d reason=serial_exception", self.can_reconnect_count + 1)
+
         while not self._stop_event.is_set():
             try:
                 retried = connect_with_retry(port=self._inner.port, baudrate=self._inner.baudrate, retry_delay_s=_RECONNECT_RETRY_DELAY_S)
                 self._inner._ser = retried._ser
                 self._inner._buffer = retried._buffer
+                self.can_reconnect_count += 1
                 logger.info("CanRxThread: reconnect thành công")
+                logger.info("CAN_RECONNECT_SUCCESS reconnect_count=%d", self.can_reconnect_count)
+                self._mark_recovered()
                 return
             except Exception as e:
                 logger.error("CanRxThread: reconnect thất bại (%s), thử lại sau %.1fs", e, _RECONNECT_RETRY_DELAY_S)
@@ -230,6 +288,11 @@ class CanRxThread:
     def can_last_frame_age_ms(self):
         """Alias dạng property của last_frame_age_ms() — dùng cho health log + SharedState."""
         return self.last_frame_age_ms()
+
+    @property
+    def can_frames_total(self):
+        """Alias của rx_count — tên rõ nghĩa hơn cho health log, KHÔNG phải counter riêng."""
+        return self.rx_count
 
     def stop(self) -> None:
         """Dừng thread RX (không đóng serial — gọi disconnect() để đóng luôn)."""
