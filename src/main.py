@@ -121,6 +121,7 @@ class SharedState:
     gps_fix: int = 0
     gps_sats: int = 0
     gps_distance_km: float = 0.0
+    gps_stale: bool = False  # tuổi sentence > GPS_STALE_MS, mirror can_stale (xem CanRxThread)
 
     # CAN stale-detect (updated mỗi tick từ CanRxThread — False/None với MockCanReader)
     can_stale: bool = False
@@ -202,6 +203,7 @@ class SharedState:
             "gps_fix": self.gps_fix,
             "gps_sats": self.gps_sats,
             "gps_distance_km": self.gps_distance_km,
+            "gps_stale": self.gps_stale,
             "can_stale": self.can_stale,
             "can_last_frame_age_ms": self.can_last_frame_age_ms,
             "pack_power_w": self.pack_power_w,
@@ -487,6 +489,7 @@ def main_loop(
                     "gps_fix":         state.gps_fix,
                     "gps_sats":        state.gps_sats,
                     "gps_distance_km": round(state.gps_distance_km, 2),
+                    "gps_stale":       state.gps_stale,
                     "can_stale":       state.can_stale,
                 })
                 if any(v > 0 for v in state.cell_data):
@@ -590,6 +593,7 @@ def main_loop(
                 _gps_t0 = time.monotonic()
                 gps_snapshot = gps_reader.get_latest()
                 _gps_get_latest_ms_max = max(_gps_get_latest_ms_max, (time.monotonic() - _gps_t0) * 1000.0)
+                _gm_1hz = gps_reader.get_metrics()
 
                 # Write results + tính sai số & MAE (locked, fast)
                 _lock_wait_t0 = time.monotonic()
@@ -612,6 +616,8 @@ def main_loop(
                         state.gps_fix = gps_snapshot["fix"]
                         state.gps_sats = gps_snapshot["sats"]
                         state.gps_distance_km = gps_snapshot["distance_km"]
+
+                    state.gps_stale = _gm_1hz["gps_stale"]
 
                     # Sai số tức thời so với BMS (ground truth)
                     err_model = soc_model - state.soc_bms
@@ -701,6 +707,7 @@ def main_loop(
             raw_queue_len = raw_writer._raw_queue.qsize() if raw_writer else None
 
             last_raw_write_age_ms = getattr(raw_writer, "last_raw_write_age_ms", None) if raw_writer else None
+            _gm = gps_reader.get_metrics()
 
             logger.info(
                 "[HEALTH] can_rx_fps=%s raw_writer_fps=%s processor_fps=%.1f "
@@ -708,7 +715,10 @@ def main_loop(
                 "can_thread_alive=%s writer_thread_alive=%s can_last_frame_age_ms=%s "
                 "gps_thread_alive=%s can_reconnect_count=%s can_serial_errors=%s "
                 "can_stale=%s last_raw_write_age_ms=%s can_stale_count=%s "
-                "can_recover_count=%s can_frames_total=%s raw_writes_total=%s",
+                "can_recover_count=%s can_frames_total=%s raw_writes_total=%s "
+                "gps_stale=%s gps_reconnect_count=%s gps_stale_count=%s "
+                "gps_recover_count=%s gps_sentences_per_sec=%.1f gps_last_sentence_age_ms=%s "
+                "gps_serial_errors=%s",
                 f"{can_rx_fps:.1f}" if can_rx_fps is not None else "n/a",
                 f"{raw_writer_fps:.1f}" if raw_writer_fps is not None else "n/a",
                 state.fps_actual,
@@ -727,6 +737,13 @@ def main_loop(
                 getattr(can_reader, "can_recover_count", "n/a"),
                 getattr(can_reader, "can_frames_total", "n/a"),
                 getattr(raw_writer, "raw_writes_total", "n/a") if raw_writer else "n/a",
+                _gm["gps_stale"],
+                _gm["gps_reconnect_count"],
+                _gm["gps_stale_count"],
+                _gm["gps_recover_count"],
+                _gm["gps_sentences_per_sec"],
+                f"{_gm['gps_last_sentence_age_ms']:.0f}" if _gm["gps_last_sentence_age_ms"] is not None else "n/a",
+                _gm["gps_serial_errors"],
             )
 
             _health_last = _health_now
@@ -735,7 +752,6 @@ def main_loop(
 
             # [GPS-HEALTH] — chẩn đoán riêng GPS + lock contention, chỉ in khi PERF_DEBUG=1
             if PERF_DEBUG:
-                _gm = gps_reader.get_metrics()
                 _gl = gps_reader.get_latest()
                 logger.info(
                     "[GPS-HEALTH] gps_enabled=%s gps_read_only=%s gps_thread_alive=%s gps_available=%s "

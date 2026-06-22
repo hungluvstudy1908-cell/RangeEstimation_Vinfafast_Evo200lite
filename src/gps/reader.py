@@ -26,6 +26,14 @@ DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUDRATE = 9600
 GPS_SERIAL_TIMEOUT_S = 1.0  # timeout đọc serial — tách hằng số để log startup thấy giá trị thật
 GPS_READ_SLEEP_S = 0.05     # sleep khi readline() rỗng — GPS 1Hz nên dư, tránh poll dồn USB bus
+
+# Mirror cơ chế stale-detect/reopen của CanRxThread (xem src/can_reader/rx_thread.py).
+# gps_stale dựa trên TUỔI SENTENCE (serial chết = không có câu NMEA nào) — KHÔNG dựa
+# trên mất fix (vào hầm mà sentence vẫn chảy thì không coi là stale, không reconnect).
+GPS_STALE_MS = 5000              # 5s không có sentence = serial chết
+GPS_STALE_LATCH_MS = 2500        # mirror CAN_STALE_LATCH_MS
+GPS_RECONNECT_COOLDOWN_MS = 3000  # mirror CAN_RECONNECT_COOLDOWN_MS
+
 _KNOT_TO_KMH = 1.852
 _EARTH_RADIUS_KM = 6371.0
 _MIN_STEP_KM = 0.002  # lọc nhiễu đứng yên — bỏ bước < 2m
@@ -62,8 +70,9 @@ class GpsReader:
         gps_reader.stop()
 
     Nếu không mở được cổng serial (không cắm GPS, sai port), reader
-    log warning rồi dừng thread — get_latest() vẫn trả về dict với
-    lat/lon=None, fix=0, không raise exception.
+    log warning rồi tự thử reopen theo cooldown (xem GPS_RECONNECT_COOLDOWN_MS)
+    — thread KHÔNG dừng. get_latest() vẫn trả về dict với lat/lon=None, fix=0,
+    không raise exception.
     """
 
     def __init__(self, port: str = None, baud: int = DEFAULT_BAUDRATE):
@@ -105,7 +114,16 @@ class GpsReader:
         self._last_sentence_mono = None  # time.monotonic() lần parse thành công gần nhất
         self._last_fix_mono = None       # time.monotonic() lần fix hợp lệ (RMC 'A') gần nhất
         self._lock_hold_ms_max = 0.0     # thời gian giữ self._lock lâu nhất, reset mỗi lần get_metrics()
-        self._reconnect_count = 0        # không có logic reconnect ở module này → luôn 0
+        self._reconnect_count = 0        # tăng mỗi lần reopen serial THÀNH CÔNG (mirror can_reconnect_count)
+
+        # --- Stale-detect + reopen (mirror CanRxThread, xem GPS_STALE_MS) ---
+        self.gps_stale = False
+        self.gps_stale_count = 0     # số episode stale (transition False→True)
+        self.gps_recover_count = 0   # 1-1 với gps_stale_count, không double-count
+        self.gps_serial_errors = 0   # số lần reopen fail
+        self._stale_latch_until_mono = 0.0
+        self._last_reconnect_mono = 0.0
+        self._loop_started_mono = None  # mốc tham chiếu tuổi sentence khi chưa có sentence nào
 
         self._metrics_last_mono = time.monotonic()
         self._metrics_last_iter = 0
@@ -118,24 +136,105 @@ class GpsReader:
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
 
-    def _read_loop(self) -> None:
+    def _open_serial(self) -> bool:
         """
-        Vòng lặp đọc + parse NMEA, chạy trong thread riêng.
+        Mở (hoặc mở lại) cổng serial GPS — dùng chung cho startup và reconnect.
 
-        Mở serial thất bại → log warning và return ngay (không raise,
-        không crash main process). Mỗi dòng parse lỗi → bỏ qua, đọc tiếp.
+        Đóng self._ser cũ nếu còn mở trước khi mở lại cùng cổng.
+
+        Returns:
+            True nếu mở thành công, False nếu serial.SerialException (log warning).
         """
+        if self._ser is not None:
+            try:
+                if self._ser.is_open:
+                    self._ser.close()
+            except Exception:
+                pass
+
         try:
             self._ser = serial.Serial(self.port, self.baud, timeout=GPS_SERIAL_TIMEOUT_S)
             self._available = True
             logger.info("GPS kết nối tại %s (%d bps)", self.port, self.baud)
+            return True
         except serial.SerialException as e:
+            # self._ser=None (không giữ object cũ đã close) — để _read_loop nhận biết
+            # qua nhánh "if self._ser is None" và sleep, tránh busy-loop gọi readline()
+            # trên port đã đóng (PortNotOpenError) cho tới cooldown reopen kế tiếp.
+            self._ser = None
             logger.warning("GPS not available tại %s, bỏ qua GPS (%s)", self.port, e)
             self._available = False
+            return False
+
+    def _mark_stale(self, reason: str, age_ms: float) -> None:
+        """
+        Đánh dấu gps_stale=True và giữ latch tối thiểu GPS_STALE_LATCH_MS — chỉ
+        log/đếm gps_stale_count 1 lần mỗi episode (transition False→True), mirror
+        _mark_stale của CanRxThread.
+        """
+        if not self.gps_stale:
+            self.gps_stale = True
+            self.gps_stale_count += 1
+            logger.warning("GPS_STALE_DETECTED reason=%s age_ms=%.0f", reason, age_ms)
+        self._stale_latch_until_mono = time.monotonic() + GPS_STALE_LATCH_MS / 1000.0
+
+    def _mark_recovered(self) -> None:
+        """Tắt gps_stale sau khi latch GPS_STALE_LATCH_MS đã hết, mirror _mark_recovered của CanRxThread."""
+        if self.gps_stale and time.monotonic() >= self._stale_latch_until_mono:
+            self.gps_stale = False
+            self.gps_recover_count += 1
+            logger.info("GPS_RECOVERED reconnect_count=%d", self._reconnect_count)
+
+    def _check_stale_and_maybe_reopen(self) -> None:
+        """
+        Phát hiện stale theo tuổi sentence gần nhất rồi tự reopen serial — mirror
+        _check_stale_and_maybe_reopen của CanRxThread. Reopen 1 lần/cooldown,
+        KHÔNG block vô hạn — nếu vẫn stale, lần check sau (cooldown kế tiếp) tự thử lại.
+        """
+        now_mono = time.monotonic()
+        reference = self._last_sentence_mono if self._last_sentence_mono is not None else self._loop_started_mono
+        if reference is None:
             return
+
+        age_ms = (now_mono - reference) * 1000.0
+        if age_ms <= GPS_STALE_MS:
+            return
+
+        self._mark_stale("age_timeout", age_ms)
+
+        if (now_mono - self._last_reconnect_mono) * 1000.0 <= GPS_RECONNECT_COOLDOWN_MS:
+            return
+
+        attempt = self._reconnect_count + 1
+        logger.warning("GPS_RECONNECT_ATTEMPT attempt=%d reason=age_timeout age_ms=%.0f", attempt, age_ms)
+        self._last_reconnect_mono = now_mono
+        if self._open_serial():
+            self._reconnect_count += 1
+            logger.info("GPS_RECONNECT_SUCCESS reconnect_count=%d", self._reconnect_count)
+        else:
+            self.gps_serial_errors += 1
+
+    def _read_loop(self) -> None:
+        """
+        Vòng lặp đọc + parse NMEA, chạy trong thread riêng.
+
+        Mở serial thất bại lúc start → KHÔNG return, đánh dấu gps_stale=True và
+        vào nhịp reconnect-theo-cooldown của _check_stale_and_maybe_reopen() như
+        khi serial chết giữa chừng. Thread chỉ dừng khi self._running=False.
+        Mỗi dòng parse lỗi → bỏ qua, đọc tiếp.
+        """
+        self._loop_started_mono = time.monotonic()
+        if not self._open_serial():
+            self._mark_stale("startup_failed", 0.0)
 
         while self._running:
             self._iter_count += 1
+            self._check_stale_and_maybe_reopen()
+
+            if self._ser is None:
+                time.sleep(GPS_READ_SLEEP_S)
+                continue
+
             try:
                 raw_line = self._ser.readline()
                 if not raw_line:
@@ -157,6 +256,7 @@ class GpsReader:
 
             self._sentence_count += 1
             self._last_sentence_mono = time.monotonic()
+            self._mark_recovered()
             if msg.sentence_type == "RMC" and getattr(msg, "status", None) == "A":
                 self._last_fix_mono = time.monotonic()
 
@@ -244,6 +344,10 @@ class GpsReader:
             ),
             "gps_lock_hold_ms_max": self._lock_hold_ms_max,
             "gps_reconnect_count": self._reconnect_count,
+            "gps_stale": self.gps_stale,
+            "gps_stale_count": self.gps_stale_count,
+            "gps_recover_count": self.gps_recover_count,
+            "gps_serial_errors": self.gps_serial_errors,
         }
 
         self._metrics_last_mono = now
