@@ -12,6 +12,7 @@ Architecture: service_architecture.md §4
 
 import logging
 import os
+import queue
 import threading
 import time
 from collections import deque
@@ -25,8 +26,10 @@ import yaml
 
 from src.can_reader.reader import WaveshareReader
 from src.can_reader.decoder import decode as decode_can
+from src.can_reader.rx_thread import CanRxThread
+from src.can_reader.raw_writer import RawCanWriter
 from src.coulomb_counter.counter import CoulombCounter
-from src.gps.reader import GpsReader
+from src.gps.reader import GpsReader, GPS_SERIAL_TIMEOUT_S
 from src.logger.writer import RuntimeLogger
 from src.preprocessing.normalize import apply_minmax
 from src.range_estimator.estimator import RangeEstimator
@@ -42,17 +45,23 @@ logger = logging.getLogger(__name__)
 TICK_HZ = 10  # Main loop frequency (Hz)
 TICK_DT = 1.0 / TICK_HZ  # Time per tick (seconds)
 INFERENCE_EVERY_N_TICK = 10  # Inference every 1 second
-EMIT_EVERY_N_TICK = 10   # Emit dashboard mỗi N tick (1=10Hz, 2=5Hz, 5=2Hz). Tăng nếu mạng yếu.
+EMIT_EVERY_N_TICK = 10     # Emit dashboard mỗi N tick (1=10Hz, 2=5Hz, 5=2Hz). Tăng nếu mạng yếu.
 RING_BUFFER_SIZE = 60  # Keep 6 seconds of data at 10Hz (needed by range_estimator)
 
 CAN_PORT = "/dev/ttyUSB0"  # Waveshare USB-CAN port
 CAN_BAUDRATE = 2_000_000  # 2 Mbps
 
+PROC_QUEUE_MAXLEN = 300  # proc_deque (lossy OK) cho main loop — raw_queue riêng giữ lossless
+
 WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 5000
 
 PERF_DEBUG = os.environ.get("PERF_DEBUG") == "1"  # Đo hiệu năng main_loop, mặc định tắt
-
+DISABLE_GPS = os.environ.get("DISABLE_GPS") == "1"  # 1 = không mở GPS serial, không start GPS thread
+# 1 = GPS thread vẫn đọc/parse NMEA bình thường, nhưng main loop KHÔNG ghi gps_*
+# vào SharedState/emit, và GpsReader không tích lũy distance_km. Dùng để cô lập
+# bug freeze: pass → bug ở distance/state/emit; fail → bug ở reader/thread/serial/parser.
+GPS_READ_ONLY = os.environ.get("GPS_READ_ONLY") == "1"
 
 # ============================================================================
 # SharedState — Dữ liệu chia sẻ giữa main loop và web server
@@ -112,6 +121,11 @@ class SharedState:
     gps_fix: int = 0
     gps_sats: int = 0
     gps_distance_km: float = 0.0
+    gps_stale: bool = False  # tuổi sentence > GPS_STALE_MS, mirror can_stale (xem CanRxThread)
+
+    # CAN stale-detect (updated mỗi tick từ CanRxThread — False/None với MockCanReader)
+    can_stale: bool = False
+    can_last_frame_age_ms: Optional[float] = None
 
 
     # Sai số tức thời & MAE trượt so với BMS (tính 1Hz)
@@ -189,6 +203,9 @@ class SharedState:
             "gps_fix": self.gps_fix,
             "gps_sats": self.gps_sats,
             "gps_distance_km": self.gps_distance_km,
+            "gps_stale": self.gps_stale,
+            "can_stale": self.can_stale,
+            "can_last_frame_age_ms": self.can_last_frame_age_ms,
             "pack_power_w": self.pack_power_w,
             "cell_data": list(self.cell_data),
             "is_kickstand": self.is_kickstand,
@@ -211,14 +228,17 @@ class SharedState:
 # ============================================================================
 
 
-def init_system() -> Tuple[WaveshareReader, CoulombCounter, SocInference, SohEstimator, Dict[str, RangeEstimator], RuntimeLogger, GpsReader]:
+def init_system() -> Tuple[object, CoulombCounter, SocInference, SohEstimator, Dict[str, RangeEstimator], RuntimeLogger, GpsReader, Optional[RawCanWriter]]:
     """
     Khởi tạo tất cả modules.
 
     Returns:
-        Tuple (can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, logger, gps_reader)
+        Tuple (can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators,
+               logger, gps_reader, raw_writer)
         range_estimators là dict {"bms", "cc", "model"} — mỗi nguồn SoC một
         instance riêng vì EWMA/warmup/freeze là trạng thái nội bộ per-instance.
+        raw_writer là None ở nhánh MOCK (không có pipeline raw cho mock — đường
+        mock đi đồng bộ, không qua RX thread/writer, harness logic giữ nguyên).
 
     Raises:
         Exception: Nếu khởi tạo bất kỳ module nào thất bại.
@@ -232,10 +252,17 @@ def init_system() -> Tuple[WaveshareReader, CoulombCounter, SocInference, SohEst
             Path(__file__).parent.parent / "data" / "raw" / "Evo200_Mixed1.csv"
         )
         can_reader = MockCanReader(csv_path=_csv)
+        raw_writer = None
         logger.info(f"MockCanReader: replay từ {_csv}")
     else:
-        logger.info(f"Connecting to Waveshare at {CAN_PORT}...")
-        can_reader = WaveshareReader(port=CAN_PORT, baudrate=CAN_BAUDRATE)
+        logger.info(f"Connecting to Waveshare CAN tại {CAN_PORT} (GPS dùng cổng riêng, xem GpsReader)...")
+        inner = WaveshareReader(port=CAN_PORT, baudrate=CAN_BAUDRATE)
+        raw_queue: "queue.Queue" = queue.Queue()       # lossless — RawCanWriter ghi disk
+        proc_deque = deque(maxlen=PROC_QUEUE_MAXLEN)    # lossy OK — main loop xử lý
+        raw_writer = RawCanWriter(raw_queue)
+        raw_writer.start()
+        can_reader = CanRxThread(inner, raw_queue, proc_deque)
+        logger.info("✓ RawCanWriter + CanRxThread khởi tạo (raw lossless, proc lossy)")
     can_reader.connect()
     logger.info("✓ CAN reader connected")
 
@@ -265,11 +292,25 @@ def init_system() -> Tuple[WaveshareReader, CoulombCounter, SocInference, SohEst
 
     # GPS Reader (VK-162) — không chặn nếu GPS không cắm, xem reader.py
     gps_reader = GpsReader()
-    gps_reader.start()
-    logger.info("✓ GPS Reader started")
+    logger.info(
+        "GPS startup: DISABLE_GPS=%s GPS_READ_ONLY=%s GPS_PORT=%s CAN_PORT=%s serial_timeout_s=%s",
+        DISABLE_GPS, GPS_READ_ONLY, gps_reader.port, CAN_PORT, GPS_SERIAL_TIMEOUT_S,
+    )
+    if DISABLE_GPS:
+        logger.warning(
+            "GPS disabled by DISABLE_GPS=1; GPS serial will NOT be opened, GPS thread will NOT start. "
+        "   GPS fields will stay at defaults."
+        )
+    else:
+        gps_reader.start()
+    logger.info(
+        "GPS serial opened: %s | GPS thread started: %s",
+        gps_reader._available, gps_reader._thread is not None and gps_reader._thread.is_alive(),
+    )
+    logger.info("✓ GPS Reader started on %s", gps_reader.port)
 
     logger.info("System initialization complete ✓")
-    return can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, runtime_logger, gps_reader
+    return can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, runtime_logger, gps_reader, raw_writer
 
 
 # ============================================================================
@@ -278,7 +319,7 @@ def init_system() -> Tuple[WaveshareReader, CoulombCounter, SocInference, SohEst
 
 
 def main_loop(
-    can_reader: WaveshareReader,
+    can_reader,
     coulomb_counter: CoulombCounter,
     soc_inference: SocInference,
     soh_estimator: SohEstimator,
@@ -288,6 +329,7 @@ def main_loop(
     state: SharedState,
     lock: threading.Lock,
     socketio=None,
+    raw_writer: Optional[RawCanWriter] = None,
 ) -> None:
     """
     Single-thread main loop chạy ở ~10Hz.
@@ -329,6 +371,16 @@ def main_loop(
     _perf_tick_ms_max = 0.0
     _perf_emit_ms_max = 0.0
 
+    # Health log 1Hz — luôn chạy (không phụ thuộc PERF_DEBUG) để theo dõi phiên thu thập dài
+    _health_last = time.monotonic()
+    _health_last_rx_count = getattr(can_reader, "rx_count", 0)
+    _health_last_written = getattr(raw_writer, "written_count", 0) if raw_writer else 0
+
+    # Metric chẩn đoán GPS/lock contention (chỉ in khi PERF_DEBUG=1, xem [GPS-HEALTH])
+    _state_lock_wait_ms_max = 0.0
+    _state_lock_hold_ms_max = 0.0
+    _gps_get_latest_ms_max = 0.0
+
     while True:
         t0 = time.monotonic()
 
@@ -337,6 +389,11 @@ def main_loop(
             frames = can_reader.read_frames()
             if PERF_DEBUG:
                 _perf_frames_max = max(_perf_frames_max, len(frames))
+
+            # Cập nhật cờ stale-detect cho dashboard (no-op/False với MockCanReader)
+            with lock:
+                state.can_stale = getattr(can_reader, "can_stale", False)
+                state.can_last_frame_age_ms = getattr(can_reader, "can_last_frame_age_ms", None)
 
             for frame in frames:
                 # Mock mode trả về decoded dict trực tiếp; hardware trả về (can_id, bytes)
@@ -432,6 +489,8 @@ def main_loop(
                     "gps_fix":         state.gps_fix,
                     "gps_sats":        state.gps_sats,
                     "gps_distance_km": round(state.gps_distance_km, 2),
+                    "gps_stale":       state.gps_stale,
+                    "can_stale":       state.can_stale,
                 })
                 if any(v > 0 for v in state.cell_data):
                     socketio.emit("update_bms", {
@@ -444,6 +503,9 @@ def main_loop(
                 _perf_emit_ms_max = max(_perf_emit_ms_max, (time.monotonic() - _e0) * 1000)
 
         except Exception as e:
+            # Với CanRxThread, read_frames() chỉ drain proc_deque và không raise —
+            # khối này thành no-op an toàn cho hardware (reconnect thật nằm trong RX
+            # thread, xem CanRxThread._reconnect_loop). Vẫn giữ cho MockCanReader.
             logger.warning(f"CAN read error: {e}, attempting reconnect...")
             try:
                 can_reader.disconnect()
@@ -527,10 +589,18 @@ def main_loop(
                 )
 
                 # GPS snapshot — đồng bộ theo state.timestamp (mốc chung của row 1Hz)
+                # (cho phép gọi get_latest() để đo dù GPS_READ_ONLY=1 — chỉ không ghi vào state)
+                _gps_t0 = time.monotonic()
                 gps_snapshot = gps_reader.get_latest()
+                _gps_get_latest_ms_max = max(_gps_get_latest_ms_max, (time.monotonic() - _gps_t0) * 1000.0)
+                _gm_1hz = gps_reader.get_metrics()
 
                 # Write results + tính sai số & MAE (locked, fast)
+                _lock_wait_t0 = time.monotonic()
                 with lock:
+                    _lock_acquired_t = time.monotonic()
+                    _state_lock_wait_ms_max = max(_state_lock_wait_ms_max, (_lock_acquired_t - _lock_wait_t0) * 1000.0)
+
                     state.soc_model = soc_model
                     state.soh = soh
                     state.range_model = range_model
@@ -539,12 +609,15 @@ def main_loop(
                     state.range_km    = range_model   # alias giữ tương thích display/logger cũ
                     state.wh_per_km   = wh_per_km
 
-                    state.gps_lat = gps_snapshot["lat"]
-                    state.gps_lon = gps_snapshot["lon"]
-                    state.gps_speed_kmh = gps_snapshot["speed_kmh"]
-                    state.gps_fix = gps_snapshot["fix"]
-                    state.gps_sats = gps_snapshot["sats"]
-                    state.gps_distance_km = gps_snapshot["distance_km"]
+                    if not GPS_READ_ONLY:
+                        state.gps_lat = gps_snapshot["lat"]
+                        state.gps_lon = gps_snapshot["lon"]
+                        state.gps_speed_kmh = gps_snapshot["speed_kmh"]
+                        state.gps_fix = gps_snapshot["fix"]
+                        state.gps_sats = gps_snapshot["sats"]
+                        state.gps_distance_km = gps_snapshot["distance_km"]
+
+                    state.gps_stale = _gm_1hz["gps_stale"]
 
                     # Sai số tức thời so với BMS (ground truth)
                     err_model = soc_model - state.soc_bms
@@ -566,6 +639,8 @@ def main_loop(
                     state.mae_model = mae_model
                     state.mae_cc    = mae_cc
                     state.mae_warm  = mae_warm
+
+                    _state_lock_hold_ms_max = max(_state_lock_hold_ms_max, (time.monotonic() - _lock_acquired_t) * 1000.0)
 
                 # Log to CSV (outside lock)
                 runtime_logger.write(state)
@@ -620,6 +695,81 @@ def main_loop(
                 _perf_frames_max = 0
                 _perf_tick_ms_max = 0.0
                 _perf_emit_ms_max = 0.0
+
+        # Health log 1Hz — drop metrics minh bạch cho phiên thu thập dài (4h+)
+        _health_now = time.monotonic()
+        _health_dt = _health_now - _health_last
+        if _health_dt >= 1.0:
+            rx_count = getattr(can_reader, "rx_count", None)
+            written_count = getattr(raw_writer, "written_count", None) if raw_writer else None
+            can_rx_fps = (rx_count - _health_last_rx_count) / _health_dt if rx_count is not None else None
+            raw_writer_fps = (written_count - _health_last_written) / _health_dt if written_count is not None else None
+            raw_queue_len = raw_writer._raw_queue.qsize() if raw_writer else None
+
+            last_raw_write_age_ms = getattr(raw_writer, "last_raw_write_age_ms", None) if raw_writer else None
+            _gm = gps_reader.get_metrics()
+
+            logger.info(
+                "[HEALTH] can_rx_fps=%s raw_writer_fps=%s processor_fps=%.1f "
+                "raw_queue_len=%s max_raw_queue_len=%s raw_dropped=0 proc_dropped=%s "
+                "can_thread_alive=%s writer_thread_alive=%s can_last_frame_age_ms=%s "
+                "gps_thread_alive=%s can_reconnect_count=%s can_serial_errors=%s "
+                "can_stale=%s last_raw_write_age_ms=%s can_stale_count=%s "
+                "can_recover_count=%s can_frames_total=%s raw_writes_total=%s "
+                "gps_stale=%s gps_reconnect_count=%s gps_stale_count=%s "
+                "gps_recover_count=%s gps_sentences_per_sec=%.1f gps_last_sentence_age_ms=%s "
+                "gps_serial_errors=%s",
+                f"{can_rx_fps:.1f}" if can_rx_fps is not None else "n/a",
+                f"{raw_writer_fps:.1f}" if raw_writer_fps is not None else "n/a",
+                state.fps_actual,
+                raw_queue_len if raw_queue_len is not None else "n/a",
+                getattr(can_reader, "max_raw_qsize", "n/a"),
+                getattr(can_reader, "proc_dropped", "n/a"),
+                getattr(can_reader, "alive", "n/a"),
+                getattr(raw_writer, "alive", "n/a") if raw_writer else "n/a",
+                f"{can_reader.last_frame_age_ms():.0f}" if hasattr(can_reader, "last_frame_age_ms") and can_reader.last_frame_age_ms() is not None else "n/a",
+                gps_reader._thread is not None and gps_reader._thread.is_alive(),
+                getattr(can_reader, "can_reconnect_count", "n/a"),
+                getattr(can_reader, "can_serial_errors", "n/a"),
+                getattr(can_reader, "can_stale", "n/a"),
+                f"{last_raw_write_age_ms:.0f}" if last_raw_write_age_ms is not None else "n/a",
+                getattr(can_reader, "can_stale_count", "n/a"),
+                getattr(can_reader, "can_recover_count", "n/a"),
+                getattr(can_reader, "can_frames_total", "n/a"),
+                getattr(raw_writer, "raw_writes_total", "n/a") if raw_writer else "n/a",
+                _gm["gps_stale"],
+                _gm["gps_reconnect_count"],
+                _gm["gps_stale_count"],
+                _gm["gps_recover_count"],
+                _gm["gps_sentences_per_sec"],
+                f"{_gm['gps_last_sentence_age_ms']:.0f}" if _gm["gps_last_sentence_age_ms"] is not None else "n/a",
+                _gm["gps_serial_errors"],
+            )
+
+            _health_last = _health_now
+            _health_last_rx_count = rx_count if rx_count is not None else 0
+            _health_last_written = written_count if written_count is not None else 0
+
+            # [GPS-HEALTH] — chẩn đoán riêng GPS + lock contention, chỉ in khi PERF_DEBUG=1
+            if PERF_DEBUG:
+                _gl = gps_reader.get_latest()
+                logger.info(
+                    "[GPS-HEALTH] gps_enabled=%s gps_read_only=%s gps_thread_alive=%s gps_available=%s "
+                    "gps_iters_per_sec=%.1f gps_sentences_per_sec=%.1f gps_parse_errors_per_sec=%.1f "
+                    "gps_last_sentence_age_ms=%s gps_last_fix_age_ms=%s gps_lock_hold_ms_max=%.2f "
+                    "gps_reconnect_count=%s state_lock_wait_ms_max=%.2f state_lock_hold_ms_max=%.2f "
+                    "gps_get_latest_ms_max=%.2f gps_fix=%s gps_sats=%s",
+                    _gm["gps_enabled"], _gm["gps_read_only"], _gm["gps_thread_alive"], _gm["gps_available"],
+                    _gm["gps_iters_per_sec"], _gm["gps_sentences_per_sec"], _gm["gps_parse_errors_per_sec"],
+                    f"{_gm['gps_last_sentence_age_ms']:.0f}" if _gm["gps_last_sentence_age_ms"] is not None else "n/a",
+                    f"{_gm['gps_last_fix_age_ms']:.0f}" if _gm["gps_last_fix_age_ms"] is not None else "n/a",
+                    _gm["gps_lock_hold_ms_max"],
+                    _gm["gps_reconnect_count"], _state_lock_wait_ms_max, _state_lock_hold_ms_max,
+                    _gps_get_latest_ms_max, _gl["fix"], _gl["sats"],
+                )
+                _state_lock_wait_ms_max = 0.0
+                _state_lock_hold_ms_max = 0.0
+                _gps_get_latest_ms_max = 0.0
 
         # Keep 10Hz timing
         sleep_time = max(0, TICK_DT - elapsed)
@@ -701,7 +851,7 @@ def main() -> None:
 
     # Initialize all modules
     try:
-        can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, runtime_logger, gps_reader = init_system()
+        can_reader, coulomb_counter, soc_inference, soh_estimator, range_estimators, runtime_logger, gps_reader, raw_writer = init_system()
     except Exception as e:
         logger.error(f"Initialization failed: {e}")
         return
@@ -722,11 +872,26 @@ def main() -> None:
             state,
             lock,
             socketio,
+            raw_writer,
         )
     except KeyboardInterrupt:
         logger.info("Shutting down...")
+        # Thứ tự: dừng RX trước (ngừng nhận khung mới) → raw_writer drain+flush+close
+        # → gps_reader. Đảm bảo raw_writer không bị đóng khi RX còn bơm khung vào queue.
         can_reader.disconnect()
+        if raw_writer is not None:
+            raw_writer.stop()
         gps_reader.stop()
+
+        total_rx = getattr(can_reader, "rx_count", None)
+        total_written = getattr(raw_writer, "written_count", None) if raw_writer else None
+        proc_dropped = getattr(can_reader, "proc_dropped", None)
+        max_raw_qlen = getattr(can_reader, "max_raw_qsize", None)
+        logger.info(
+            "[SUMMARY] total_rx_frames=%s total_written_frames=%s raw_dropped_frames=0 "
+            "proc_dropped_frames=%s max_raw_queue_len=%s",
+            total_rx, total_written, proc_dropped, max_raw_qlen,
+        )
         logger.info("Goodbye!")
 
 
